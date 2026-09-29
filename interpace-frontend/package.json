@@ -9,14 +9,26 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.5.42"
+    "@element-plus/icons-vue": "^2.3.1",
+    "@wangeditor/editor": "^5.1.23",
+    "@wangeditor/editor-for-vue": "^5.1.12",
+    "axios": "^1.12.2",
+    "element-plus": "^2.13.2",
+    "markdown-it": "^14.1.1",
+    "pinia": "^3.0.4",
+    "prismjs": "^1.30.0",
+    "vue": "^3.5.25",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/prismjs": "^1.26.6",
     "@types/node": "^24.13.3",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/tsconfig": "^0.9.1",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
-    "vue-tsc": "^3.3.11"
+    "vue-tsc": "^3.3.11",
+    "sass": "^1.97.3"
   }
 }
