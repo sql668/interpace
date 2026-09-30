@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmProfileProposal, dismissProfileProposal } from '@/api/profile'
 import type { ProfileProposalItem, ProfileProposalStatus } from '@/types/profile'
+import { notifyError } from '@/utils/errorMessage'
 
 const props = defineProps<{
   /** 待确认记录本体（由会话级列表接口一次取回，卡片不再自己请求） */
@@ -76,7 +77,7 @@ const handleConfirm = async () => {
     ElMessage.success(result.message)
     emit('updated', result.proposal)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存失败，请稍后重试')
+    notifyError(error, '保存失败，请稍后重试')
   } finally {
     submitting.value = false
   }
@@ -91,7 +92,7 @@ const handleDismiss = async () => {
     ElMessage.info(result.message)
     emit('updated', result.proposal)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '操作失败，请稍后重试')
+    notifyError(error, '操作失败，请稍后重试')
   } finally {
     submitting.value = false
   }

@@ -1,8 +1,11 @@
-# FastAPI
+# 面途 InterPace · 后端
+
+FastAPI + SQLAlchemy + LangGraph。接口统一带 **`/api/v1`** 前缀（探活 `/health/*` 除外）。
+项目总览与本地启动见根目录 [README](../README.md)。
 
 ## 1) 包管理器
 
-使用 uv 作为包管理器器
+使用 uv 作为包管理器。
 
 ## 2) 安装依赖
 
@@ -14,23 +17,22 @@ uv sync
 
 项目支持按环境分层读取配置，避免将敏感数据写入代码：
 
-1. 复制模板并按环境创建文件。
-   - `.env.development`
-   - `.env.testing`
-   - `.env.production`
-2. 通过 `APP_ENV` 选择当前环境（默认 `development`）。
-
-示例（Windows cmd）：
-
-```bash
-set APP_ENV=development
-```
-
-示例（PowerShell）：
+1. 复制模板并按环境创建文件，**四套环境各一个**：
+   - `.env.development`（本机开发）
+   - `.env.demo`（对外演示，启用配额）
+   - `.env.test`（测试）
+   - `.env.production`（正式）
+2. 通过 `APP_ENV` 选择当前环境（默认 `development`，也接受 `dev` / `prod` / `staging` 别名）。
 
 ```bash
-$env:APP_ENV="development"
+APP_ENV=demo uv run uvicorn app.main:app --reload
 ```
+
+**两个容易踩的点**：
+
+- `APP_ENV` 指向的 `.env.{APP_ENV}` 是**唯一**的配置来源，**没有基础 `.env` 兜底**——
+  文件不存在会直接报 `MYSQL_URL is required`。
+- `APP_ENV` 写错会**启动即失败**并列出可选值（刻意如此：静默退回开发环境会让人误以为配额开着）。
 
 MinIO 对象存储配置（可写入 `.env.development`）：
 
@@ -42,13 +44,15 @@ MINIO_BUCKET=ai-resources
 MINIO_SECURE=false
 ```
 
-## 4) 启动服务（自动建表）
+## 4) 启动服务
 
 ```bash
-uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
-服务启动时会基于 SQLAlchemy 模型自动执行建表（`create_all`）。
+**建表行为按环境区分**：`development` 会跑一次 `create_all` 补齐缺失的表（图方便）；
+**其余环境都不跑**，表结构的唯一权威是 Alembic 迁移。别指望 `create_all` 改列或改索引——
+它只建缺失的表。
 
 ## 5) Alembic 管理表结构变更
 
@@ -57,6 +61,25 @@ uvicorn app.main:app --reload
 ```bash
 alembic upgrade head
 ```
+
+> 容器部署时这一步由 `docker-entrypoint.sh` 在启动前自动执行。
+> 详细流程（含 autogenerate 的三个盲区、已有库如何首次接入）见
+> [数据库变更流程](../docs/开发/数据库变更流程.md)。
+
+## 6) 测试
+
+```bash
+uv run pytest          # 需要 MySQL 在运行（测试连真实数据库）
+```
+
+## 演示环境配额
+
+演示环境的限制（按 IP 限 token、每日轮数/出题/复盘次数、单场面试时长、降本开关）
+写在 **`config/demo_limits.json`**，改完最多 5 秒热生效、不用重启。
+当前生效值可以问接口：`GET /api/v1/config/runtime`。
+
+为什么配额卡在 `app/agent/llm.py`：那是全项目**唯一**的模型出口，
+在接口入口按次数限流和真实 token 消耗完全不是一回事（详见 `docs/TODO.md` 阶段 12）。
 
 模型修改后一键同步：
 
@@ -99,8 +122,12 @@ alembic upgrade head
 - 教学版旧逻辑保留在 `app/services/upload_service.py`（不参与运行）
 - 实际运行逻辑在 `app/services/upload_service_minio.py`
 
-详细实现说明见：[docs/resource_upload_design.md](docs/resource_upload_design.md)
-数据完整性验收清单见：[docs/resource_data_integrity_acceptance.md](docs/resource_data_integrity_acceptance.md)
+接口契约（参数、错误码、去重规则）见 [接口文档 · 资源与上传](../docs/接口/学习与素材.md)；
+相关的设计取舍与踩过的坑记在 [docs/TODO.md](../docs/TODO.md) 阶段 3。
+
+> 注：上面两处原来指向 `docs/resource_upload_design.md` 与
+> `docs/resource_data_integrity_acceptance.md`，这两个文件在仓库里**并不存在**
+> （已改为指向现有文档）。链接指向不存在的文件比没有链接更误导。
 
 ## 过期资源定时清理（每天 03:00）
 
@@ -123,4 +150,3 @@ python scripts/run_expired_resource_cleanup.py
 - `--hour`：执行小时（默认 `3`）
 - `--minute`：执行分钟（默认 `0`）
 - `--timezone`：时区（默认 `Asia/Shanghai`）
-

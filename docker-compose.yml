@@ -108,7 +108,9 @@ services:
   backend:
     build:
       context: ./interpace-backend
-    image: interpace-backend:${IMAGE_TAG:-local}
+    # 镜像名支持带仓库前缀：用 CI 构建并推到镜像仓库后，服务器只 `docker compose pull` 就行。
+    # 例：IMAGE_PREFIX=registry.cn-shenzhen.aliyuncs.com/你的命名空间/  IMAGE_TAG=v2026-10-01
+    image: ${IMAGE_PREFIX:-}interpace-backend:${IMAGE_TAG:-local}
     restart: unless-stopped
     env_file:
       - ./.env
@@ -153,7 +155,7 @@ services:
       args:
         # 与 Nginx 反代路径一致；改这里要同时改 deploy/nginx.conf
         VITE_API_BASE_URL: /api/v1
-    image: interpace-frontend:${IMAGE_TAG:-local}
+    image: ${IMAGE_PREFIX:-}interpace-frontend:${IMAGE_TAG:-local}
     restart: unless-stopped
     ports:
       # 默认 80；本地验证时可以用 WEB_PORT=8080 避开系统占用。

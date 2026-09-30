@@ -20,6 +20,7 @@ import {
 import { createNote } from '@/api/note'
 import { uploadFile } from '@/api/upload'
 import type { InterviewEvaluation } from '@/types/chat'
+import { notifyError } from '@/utils/errorMessage'
 
 const props = defineProps<{
   /** 当前会话里可复盘的面试记录 ID（一场面试一个，取最近的） */
@@ -91,7 +92,7 @@ const handleGenerate = async () => {
     notGenerated.value = false
     ElMessage.success(data.message)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '生成复盘失败，请稍后重试')
+    notifyError(error, '生成复盘失败，请稍后重试')
   } finally {
     generating.value = false
   }
@@ -127,7 +128,7 @@ const handleAudioChange = async (event: Event) => {
     notGenerated.value = false
     ElMessage.success(data.message)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '录音复盘失败，请稍后重试')
+    notifyError(error, '录音复盘失败，请稍后重试')
   } finally {
     uploading.value = false
   }

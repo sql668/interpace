@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import type { NoteUpdatePayload } from '@/types/note'
+import { resolveErrorMessage } from '@/utils/errorMessage'
 
 /** 保存状态：idle 无待提交 / pending 已攒改动等防抖 / saving 请求中 / saved 已保存 / error 失败 */
 export type NoteSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error'
@@ -66,7 +67,7 @@ export function useNoteAutoSave(options: UseNoteAutoSaveOptions) {
           const newer = pendingByNote.get(noteId) ?? {}
           pendingByNote.set(noteId, { ...payload, ...newer })
           status.value = 'error'
-          options.onError?.((error as Error).message || '笔记保存失败')
+          options.onError?.(resolveErrorMessage(error, '笔记保存失败'))
           break
         }
       }

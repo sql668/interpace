@@ -49,7 +49,7 @@ fi
 
 SIZE="$(du -h "$TARGET" | cut -f1)"
 # 注意写成 ${VAR}：变量后面紧跟中文标点时，shell 可能把标点当成变量名的一部分
-# （实测 `$TARGET（` 会报 "TARGET（: unbound variable"，因为全角括号被吃了进去）。
+# （实测 `${TARGET}（` 会报 "TARGET（: unbound variable"，因为全角括号被吃了进去）。
 echo "[备份] 完成：${TARGET}（${SIZE}）"
 
 # 轮转：按文件名倒序，只保留最近 $KEEP 份

@@ -15,6 +15,7 @@ import { uploadFile } from '@/api/upload'
 import { useRuntimeConfig } from '@/composables/useRuntimeConfig'
 import { DEFAULT_CHAT_MODE, type ChatMode } from '@/constants/chat-modes'
 import type { MessageSegment } from '@/types/chat'
+import { notifyError } from '@/utils/errorMessage'
 
 const props = withDefaults(
   defineProps<{
@@ -150,7 +151,8 @@ const onFileChange = async (event: Event) => {
       ElMessage.warning(uploaded.parse.message)
     }
   } catch (error) {
-    ElMessage.error((error as Error).message || '附件上传失败')
+    // 走统一助手：优先后端 message，并且跳过拦截器已经提示过的（否则一次失败弹两个框）
+    notifyError(error, '附件上传失败')
   } finally {
     uploading.value = false
   }

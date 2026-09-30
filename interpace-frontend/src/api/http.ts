@@ -1,6 +1,7 @@
 import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { env } from '@/config/env'
+import { markNotified, resolveErrorMessage } from '@/utils/errorMessage'
 import router from '../router'
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from './token'
 
@@ -51,13 +52,28 @@ api.interceptors.response.use(
 
     // 非 401 或已重试过，直接抛出
     if (status && status !== 401) {
-      // 常见状态码统一提示
-      if (status === 400) ElMessage.error('请求参数错误')
-      if (status === 403) ElMessage.error('没有访问权限')
-      if (status === 404) ElMessage.error('资源不存在')
-      if (status === 409) ElMessage.error('资源冲突')
-      if (status === 422) ElMessage.error('请求参数校验失败')
-      if (status === 500) ElMessage.error('系统异常，请稍后再试')
+      // 优先用**后端返回的 message**：它比"按状态码套模板"具体得多，
+      // 例如 429 的"演示环境的体验额度已用完…"、409 的"用户名已被占用"。
+      // 拿不到后端文案时才退回通用提示。
+      const statusFallback: Record<number, string> = {
+        400: '请求参数错误',
+        403: '没有访问权限',
+        404: '资源不存在',
+        409: '资源冲突',
+        422: '请求参数校验失败',
+        429: '请求过于频繁，请稍后再试',
+        500: '系统异常，请稍后再试'
+      }
+      const text = resolveErrorMessage(error, statusFallback[status] ?? '请求失败，请稍后再试')
+      // 429 是有"明确原因"的一类（配额用完 / 限流），用 warning 而不是 error，
+      // 视觉上更贴近"不是坏了，是暂时不能用了"。
+      if (status === 429) {
+        ElMessage.warning(text)
+      } else {
+        ElMessage.error(text)
+      }
+      // 标记一下，避免组件里再弹一次（同一次失败弹两个框很烦）
+      markNotified(error)
       return Promise.reject(error)
     }
 

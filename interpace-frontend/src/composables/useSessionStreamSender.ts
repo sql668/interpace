@@ -4,6 +4,7 @@ import { stopStreamChat } from '@/api/chat'
 import { DEFAULT_CHAT_MODE } from '@/constants/chat-modes'
 import type { MessageSegment } from '@/types/chat'
 import { createTypewriterStream, type TypewriterStream } from '@/utils/typewriterStream'
+import { resolveErrorMessage } from '@/utils/errorMessage'
 
 // 用于写入流式消息内容的接口
 type PendingWriter = {
@@ -155,7 +156,7 @@ export function useSessionStreamSender(options: UseSessionStreamSenderOptions) {
       if (requestEpoch === streamEpoch.value) {
         typewriter.flush()
         pending.cancel()
-        options.onError?.(err.message || '流式请求失败')
+        options.onError?.(resolveErrorMessage(err, '流式请求失败'))
       }
     } finally {
       // 不是当前流，直接返回避免重入

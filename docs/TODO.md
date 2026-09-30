@@ -2030,6 +2030,133 @@ dependency failed to start: container interpace-redis-1 is unhealthy
 做不到时，至少要用 `docker image inspect` 自检产物架构——一条命令的成本，
 比到服务器上才发现便宜得多。
 
+**流程第三次修正（2026-09-30）：源码走 git，在服务器上 clone 后构建**
+
+用户实际采用的流程是"本机 push → 服务器 `git clone` → `docker compose build`"，
+比他手动 rsync 更省事，所以把它定为推荐做法并重写了文档：
+
+1. **首次部署**：本机 `git push` → 服务器 `git clone <仓库> /opt/interpace` →
+   `cp .env.example .env` 并填值 → 准备三个第三方镜像（服务器上往往已有，直接用；
+   没有就 pull，注意架构）→ `docker compose build && up -d`。
+2. **更新**：`git pull` → `build` → `up -d` → 冒烟。
+3. **回滚**：`git checkout <上一个提交>` → `build` → `up -d` → 冒烟；
+   比"换镜像标签"直观得多。
+
+**文档里特别强调了两点**（都是会让人卡住的地方）：
+
+- **`.env` 永远不会从 git 来**（它被 gitignore 排除，这是对的——里面是密钥）。
+  新机器必须 `cp .env.example .env` 再填，忘掉的表现是 `MYSQL_ROOT_PASSWORD is missing a value`。
+- **部署相关的新文件要确认已提交**。Dockerfile 这类文件第一次是"未跟踪"状态，
+  只 `git commit` 已有改动的话不会带上它们，服务器 clone 下来就会报
+  `open Dockerfile: no such file or directory`（用户实际撞到的就是这条）。
+  文档里给了一条自检：`git ls-files | grep -E "Dockerfile|docker-compose|..."`。
+
+**流程第四次修正（2026-09-30）：CI 构建 + 镜像仓库**
+
+用户在服务器上实测 `docker compose build` **太慢**（2核2G：拉基础镜像 + 下几百 MB 依赖 +
+vite 吃满 CPU）。给出的解法按"见效快慢"排序：
+
+1. **前端镜像在本机交叉构建后传过去**（实测可行）：node 在 QEMU 下正常，
+   前端镜像 64 秒构建完、amd64、`docker save | gzip` 后只有 **20MB**，
+   传过去 `docker load` 即可。服务器上就只剩后端的 `uv sync`。
+2. **CI 构建 + 镜像仓库（推荐长期方案）**：新增 `.github/workflows/build-images.yml`，
+   runner 本来就是 amd64，构建完推到镜像仓库（阿里云 ACR / 腾讯云 TCR，Docker Hub 在国内慢），
+   服务器只 `docker compose pull`。compose 里为此加了 `IMAGE_PREFIX` 支持：
+   `image: ${IMAGE_PREFIX:-}interpace-backend:${IMAGE_TAG:-local}`（实测插值正常）。
+
+**注意**：工作流只做了结构校验（YAML 能解析、步骤齐全），**没有真正跑过 GitHub Actions**——
+本机跑不了。第一次用要留意 Actions 日志，可能需要调的就是仓库地址与凭据。
+
+### 服务器部署的当前状态（2026-09-30，用户要求先搁置）
+
+已经打通的：服务器（amd64，2核2G）上 `git clone` + `docker compose build` + `up -d` 能跑起来，
+后端容器启动时自动执行了迁移，**本机 `curl 127.0.0.1:8080` 返回 200**。
+
+还没做完的三件事（都不是代码问题）：
+
+1. **外网访问不通**：腾讯云轻量应用服务器的「防火墙」默认只放行 22/80/443/3389，
+   ~~需要在控制台手动放行 TCP 8080~~ **已解决**：用户接了 NPM，域名
+   `https://interai.sql668.com` 可以访问了。
+2. **MinIO 镜像仍是 arm64**：那是早先打包传过去的，在 amd64 上跑不起来 →
+   **附件上传会 500**（其他功能不受影响，所以不容易发现）。换法见部署文档的 MinIO 一节。
+3. **域名与 HTTPS 还没接**：服务器上已有 Nginx Proxy Manager（容器名 `npm-app-1`，占着 80/81/443），
+   ~~接入方式见部署文档~~ **已解决**：已接上 NPM，域名 `interai.sql668.com` 可用。
+
+**接上 NPM 后发现并修复的一个真问题（2026-09-30）**：
+客户端 IP 被 NPM 的地址覆盖了 —— 我们的 nginx 用 `proxy_set_header X-Real-IP $remote_addr`，
+而 `$remote_addr` 此时是 NPM 容器的地址，于是**所有访客共用一个配额桶**，
+第一个人的用量算到所有人头上（用户遇到的 429 有一部分就是这么来的）。
+
+修法：`deploy/nginx.conf` 加 realip 模块配置，从 `X-Forwarded-For` 还原真实客户端地址。
+**实测验证过**：带 `X-Forwarded-For: 203.0.113.99` 发一轮对话，后端 `usage_records.client_ip`
+记的就是 `203.0.113.99`（修复前记的是 `172.27.0.5` 这类容器网段地址）。
+
+> 安全前提：这段配置信任内网网段，所以配合 NPM 部署时前端端口**必须绑回环**
+> （`WEB_PORT=127.0.0.1:8088`），不能发布到公网，否则可以伪造 IP 绕过配额。
+
+**用户遇到的 429 说明**：服务器用的是 `APP_ENV=demo`（那份 `.env` 是从本机拷过去的），
+演示配额生效，其中「每个 IP 每天最多 1 次面试复盘」限制了第二次复盘。
+调大数值改 `config/demo_limits.json` 即可（改完热生效；容器重建会被镜像里的原文件覆盖）。
+
+#### 顺手修掉的体验问题：429 弹的是 axios 英文原文（2026-09-30）
+
+**现象**：页面弹窗写着 `Request failed with status code 429`，用户看不出为什么被拦。
+
+**根因**：`http.ts` 的响应拦截器里**根本没有 429 分支**（只处理了 400/403/404/409/422/500），
+而各组件又是自己 `ElMessage.error(error.message)` —— axios 的默认文案就这么露出来了。
+
+**修法**（新增 `src/utils/errorMessage.ts`，两个函数）：
+
+1. `resolveErrorMessage(error, fallback)`：按「后端 `message` → 非 axios 默认文案的
+   `error.message` → `fallback`」的顺序取一句话。后端本来就返回精心写过的中文
+   （429 是"演示环境的体验额度已用完…"、409 是"用户名已被占用"），比"按状态码套模板"准确得多。
+   顺带把 `Request failed with status code xxx` 和 `Network Error` 这两种无信息量的英文过滤掉。
+2. `notifyError(error, fallback)`：拦截器已经弹过就跳过（拦截器会打 `__notified` 标记），
+   **避免同一次失败弹两个框**。
+
+**改动的文件**：`api/http.ts`（加 429 分支、优先后端文案、按状态码兜底、打标记）、
+`utils/errorMessage.ts`（新增），以及 8 处自己弹提示的组件/composable
+（EvaluationPanel ×2、ProfileProposalCard ×2、QuizCard、ResumeDownloadButton、ChatInput、
+useNoteAutoSave、useSessionStreamSender、LoginCard）。
+
+**顺带**：429 用 `ElMessage.warning` 而不是 `error` —— 它的语义是"暂时不能用了"，
+不是"坏了"，视觉上不该一样刺眼。
+
+**验证**：**真机跑过**。先把登录接口的限流打满（10 次/分钟），再用浏览器真的提交一次登录，
+读到的弹窗是 `[warning] 请求过于频繁，请稍后再试`——**一条、中文、warning 样式**；
+修复前这里会是 `[error] Request failed with status code 429`。
+
+> 说明：验证走的是"限流触发的 429"这条路径（最容易构造）。配额触发的 429
+> （用户实际遇到的那种）走的是同一段代码，会显示后端那句"演示环境的体验额度已用完…"，
+> 但没有单独构造场景跑一遍。
+
+> 本机开发环境（`localhost:8080`）**不受这些影响**，五个容器都健康、冒烟全过。
+> 上面三条只是"对外可用"的最后一段路。
+
+### 本地开发体验：一键启停脚本 + 环境验证文档（2026-09-30）
+
+用户提出两个诉求，都已交付并**实测**：
+
+1. **一键启停**：新增根目录 `dev.sh`（`start` / `stop` / `restart` / `status` / `logs`），
+   后台运行 + PID 文件 + 日志落在 `.dev-run/`（已 gitignore）。**只管应用、不管中间件**
+   ——MySQL 是系统服务、Redis/MinIO 是常驻容器且可能被别的项目共用，脚本只检查不启停。
+2. **环境验证方法**：写进 `docs/开发/本地开发环境.md`，核心是"另起一个端口 + 独立的
+   `.env.{APP_ENV}`"，用 `/api/v1/config/runtime` 一眼看配置有没有生效。
+
+写这两个东西时踩到/修掉的问题（都记在文档里了）：
+
+- **`$var` 后面紧跟中文标点会被当成变量名**：`"（PID $pid）"` 触发
+  `pid）: unbound variable`。同一个坑我这是**第二次**踩（第一次在 `deploy/backup.sh`）。
+  已把三个脚本里所有"变量 + 中文标点"的写法统一改成 `${var}`。
+- **kill 父进程停不干净**：`uvicorn --reload` / `vite` 都会 fork 子进程，只 kill 父进程
+  会让子进程被 reparent 到 init、继续占着端口（脚本报"已停止"但端口没释放）。
+  修法是**先 `pgrep -P` 记下子进程再杀父进程**；另外保留"按端口兜底收掉"作为最后防线。
+
+**实测**：`start` → 两个服务就绪（后端 health 200、前端 200）；`stop` → 两个端口都释放、
+无残留；再 `start` 恢复正常。环境验证也真跑了：8001 起 `APP_ENV=demo` 时
+`/config/runtime` 返回 `quota_enforced: true` + 完整 limits，而 8000 的 development 是
+`false` + `limits: null`。
+
 ---
 
 ## 14. 阶段 12：多环境配置与演示环境限制

@@ -1,0 +1,85 @@
+# 构建并推送前后端镜像（amd64）。
+#
+# 为什么需要它：在 Apple Silicon 上构建不出 amd64 镜像（后端的 `uv` 在 QEMU 下段错误），
+# 而在 2核2G 的服务器上构建又太慢（vite 峰值 1GB，还要装一大堆依赖）。
+# GitHub Actions 的 runner **本来就是 amd64**，原生构建又快又稳，构建完推到镜像仓库，
+# 服务器只 `docker compose pull` —— 从几分钟降到几秒。
+#
+# 触发方式：打 tag（推荐，tag 名会当作镜像版本）或手动触发。
+#   git tag v2026-10-01 && git push origin v2026-10-01
+#
+# 首次使用前，在 GitHub 仓库的 Settings 里配好：
+#   Variables（普通变量）：REGISTRY、REGISTRY_NAMESPACE
+#   Secrets（密钥）：REGISTRY_USERNAME、REGISTRY_PASSWORD
+# 以阿里云容器镜像服务（ACR）为例：
+#   REGISTRY            = registry.cn-shenzhen.aliyuncs.com
+#   REGISTRY_NAMESPACE  = 你的命名空间
+#   用户名/密码          = ACR 控制台设置的固定密码
+# 用 Docker Hub 的话：REGISTRY=docker.io，NAMESPACE=你的用户名。
+# （大陆服务器从 Docker Hub 拉取较慢，ACR / 腾讯云 TCR 会快得多。）
+
+name: 构建并推送镜像
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ vars.REGISTRY }}
+  NAMESPACE: ${{ vars.REGISTRY_NAMESPACE }}
+
+jobs:
+  build:
+    # ubuntu-latest 是 amd64 —— 这正是我们要的构建架构
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录镜像仓库
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      # 镜像名与 compose 里的写法一致：${IMAGE_PREFIX}interpace-backend:${IMAGE_TAG}
+      - name: 构建并推送后端
+        uses: docker/build-push-action@v6
+        with:
+          context: ./interpace-backend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/interpace-backend:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/interpace-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 构建并推送前端
+        uses: docker/build-push-action@v6
+        with:
+          context: ./interpace-frontend
+          platforms: linux/amd64
+          push: true
+          # 接口基地址：与 Nginx 反代路径一致（见 interpace-frontend/deploy/nginx.conf）
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/interpace-frontend:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/interpace-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 输出摘要
+        run: |
+          echo "### 镜像已推送 :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "服务器上这样部署：" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker compose pull && docker compose up -d" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "对应的 .env：IMAGE_PREFIX=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/ IMAGE_TAG=${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"

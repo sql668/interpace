@@ -159,6 +159,9 @@ activemq-data/
 # 数据库备份产物（deploy/backup.sh 的输出）。里面有全量业务数据，绝不能进仓库。
 backups/
 
+# 本地开发启停脚本的运行时文件（PID 与日志）
+.dev-run/
+
 .envrc
 .venv
 env/
@@ -253,4 +256,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-

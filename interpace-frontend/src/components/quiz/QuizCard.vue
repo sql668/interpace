@@ -5,6 +5,7 @@ import QuizQuestionBlock from './QuizQuestionBlock.vue'
 import { createNote } from '@/api/note'
 import { getQuizPaperDetail, submitQuizPaper } from '@/api/quiz'
 import type { QuizPaperDetail, QuizQuestionItem } from '@/types/quiz'
+import { resolveErrorMessage } from '@/utils/errorMessage'
 
 const props = defineProps<{
   /** 卷子 ID，来自「按会话列出卷子」或流式结束时的 quiz_paper_id */
@@ -88,7 +89,7 @@ const handleSubmit = async () => {
     submitted.value = false
     ElMessage.success('评分完成')
   } catch (error) {
-    const message = error instanceof Error ? error.message : '提交失败，请稍后重试'
+    const message = resolveErrorMessage(error, '提交失败，请稍后重试')
     ElMessage.error(message)
   } finally {
     submitting.value = false

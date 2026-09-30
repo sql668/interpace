@@ -28,6 +28,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `docker-compose.yml` | 编排：mysql / redis / minio / backend / frontend |
+| `docker-compose.npm.yml` | 叠加文件：服务器上已有 Nginx Proxy Manager 时用（见对应章节） |
 | `.env.example` | compose 用的变量模板，**复制成 `.env`** 后填值 |
 | `interpace-backend/Dockerfile` | 后端两阶段构建（uv 装依赖，非 root 运行） |
 | `interpace-backend/docker-entrypoint.sh` | 启动前跑 `alembic upgrade head`，再 exec uvicorn |
@@ -88,20 +89,43 @@ dependency failed to start: container interpace-redis-1 is unhealthy
 ## 推荐流程：在服务器上构建
 
 服务器本身就是 amd64，原生构建没有架构问题，也不需要传镜像包。
+**源码走 git**：本机 push、服务器 clone / pull —— 后续更新只要一条 `git pull`。
+
+### 首次部署
 
 ```bash
-# ---- 本机：把源码传上去（排除依赖与产物，通常只有几十 MB）----
-rsync -av --delete \
-  --exclude 'node_modules' --exclude '.venv' --exclude 'dist' \
-  --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.git' --exclude 'backups' \
-  interpace-backend interpace-frontend docker-compose.yml .env \
-  root@<服务器>:/opt/interpace/
+# ---- 本机：先确认部署相关文件都提交了 ----
+git status --short          # 应该是空的（或者只剩你没打算提交的东西）
+git add -A && git commit -m "部署配置" && git push
 
-# ---- 服务器 ----
+# 快速自检：这些文件必须在版本控制里，否则服务器 clone 下来会缺东西
+git ls-files | grep -E "Dockerfile|docker-compose|docker-entrypoint|\.dockerignore|\.env\.example"
+
+# ---- 服务器：clone ----
+mkdir -p /opt && cd /opt
+git clone <仓库地址> interpace
 cd /opt/interpace
 
-# MinIO 镜像必须登录后才能拉（匿名拉取已被官方拒绝，见下一节）
-docker login quay.io
+# ---- 配置：.env 不在仓库里，必须手建 ----
+cp .env.example .env
+vim .env                    # 填 MySQL/MinIO 密码、JWT_SECRET、模型 Key
+```
+
+> **`.env` 永远不会从 git 来**（已被 `.gitignore` 排除，这是对的——它装的是密钥）。
+> 所以每次换机器都要手动建一份。忘了这步的表现是：
+> `MYSQL_ROOT_PASSWORD is missing a value`。
+
+```bash
+# ---- 服务器：准备镜像与启动 ----
+# 三个第三方镜像必须是对架构的。如果服务器上已有就直接用（compose 不会重复拉）；
+# MinIO 的地址按上一节挑一个能拉到的源，必要时写进 .env 的 MINIO_IMAGE
+docker image ls | grep -E "mysql|redis|minio"
+docker pull mysql:8.0
+docker pull redis:7-alpine
+docker pull minio/minio:latest        # 拉不到就 docker login quay.io 再拉 quay.io/minio/minio:latest
+
+# 自检架构（必须是 amd64）
+docker image inspect mysql:8.0 redis:7-alpine minio/minio:latest --format '{{.RepoTags}} {{.Architecture}}'
 
 # 先构建、再启动：构建期间不跑数据服务，能省下几百 MB 内存（2核2G 上很关键）
 docker compose build
@@ -109,7 +133,31 @@ docker compose up -d
 docker compose ps
 ```
 
-2核2G 上的几条经验：
+### 后续更新
+
+```bash
+# ---- 本机 ----
+git add -A && git commit -m "..." && git push
+
+# ---- 服务器 ----
+cd /opt/interpace
+git pull
+docker compose build            # 只重建有变化的镜像（Docker 层缓存会跳过没变的）
+docker compose up -d
+docker compose ps
+./deploy/smoke-test.sh          # 冒烟过了才算更新成功
+```
+
+回滚到上一个提交：
+
+```bash
+git log --oneline -5            # 找到上一个能用的提交
+git checkout <那个提交>
+docker compose build && docker compose up -d
+# 注意："迁移只向前"，回滚代码不代表回滚数据库（见"更新与回滚"一节）
+```
+
+### 服务器上构建时的几条经验（2核2G）
 
 1. **加一块 swap 兜底**（vite 构建峰值约 1GB，2G 机器属于紧平衡）：
    ```bash
@@ -119,6 +167,77 @@ docker compose ps
 2. **前端依赖走国内镜像**：`NPM_CONFIG_REGISTRY=https://registry.npmmirror.com docker compose build`
    （后端 PyPI 已在 `pyproject.toml` 里配了清华源，不用管）。
 3. **首次构建慢是正常的**（下载依赖 + 编译前端），后续改代码再构建会走缓存，快很多。
+
+### 为什么不用 rsync 传源码
+
+一开始文档写的是 `rsync` 把源码推上去。它也能用，但有几个缺点：
+服务器上多一份"没有版本信息"的文件（不知道当前跑的是哪个提交）、更新时要手工挑文件、
+`.gitignore` 里的规则不会自动生效。**源码走 git** 之后这些都省了，回滚也只是切个提交。
+
+没有 git 可用时（比如仓库是私有的而服务器没有密钥），再用 rsync 或打包：
+
+```bash
+# ---- 本机：把源码传上去（排除依赖与产物，通常只有几十 MB）----
+rsync -av --delete \
+  --exclude 'node_modules' --exclude '.venv' --exclude 'dist' \
+  --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.git' --exclude 'backups' \
+  interpace-backend interpace-frontend docker-compose.yml .env \
+  root@<服务器>:/opt/interpace/
+```
+
+## 服务器构建太慢？用 CI 构建 + 镜像仓库（推荐长期这么做）
+
+在 2核2G 上构建，慢主要慢在三处：**构建镜像要拉基础镜像、装依赖要下几百 MB、
+vite 构建还吃满 CPU**。如果不止部署一两次，最省事的是把构建挪到 CI：
+
+### 为什么这么做
+
+- GitHub Actions 的 runner **本来就是 amd64**——不用再纠结跨架构；
+- 构建在云端跑，不占服务器的 CPU 和内存；
+- 服务器只需要 `docker compose pull`，**从几分钟变成几秒**。
+
+### 三步开启
+
+1. **仓库里已经有工作流**：`.github/workflows/build-images.yml`，打 tag 触发：
+   ```bash
+   git tag v2026-10-01 && git push origin v2026-10-01
+   ```
+2. **在 GitHub 仓库的 Settings 里配 4 个值**（Settings → Secrets and variables → Actions）：
+
+   | 类型 | 名字 | 例子 |
+   | --- | --- | --- |
+   | Variables | `REGISTRY` | `registry.cn-shenzhen.aliyuncs.com` |
+   | Variables | `REGISTRY_NAMESPACE` | 你的 ACR 命名空间 |
+   | Secrets | `REGISTRY_USERNAME` | ACR 控制台设的固定用户名 |
+   | Secrets | `REGISTRY_PASSWORD` | ACR 控制台设的固定密码 |
+
+3. **服务器改成"拉镜像"**：`.env` 里加两行
+   ```bash
+   IMAGE_PREFIX=registry.cn-shenzhen.aliyuncs.com/你的命名空间/
+   IMAGE_TAG=v2026-10-01
+   ```
+   然后：
+   ```bash
+   docker compose pull backend frontend
+   docker compose up -d
+   ./deploy/smoke-test.sh
+   ```
+
+### 用 Docker Hub 行不行
+
+行，但**不推荐用在你的场景**：
+
+- 服务器在国内，从 Docker Hub 拉取慢，还常遇到速率限制；
+- Docker Hub 免费版的私有仓库数量有限，而阿里云 ACR / 腾讯云 TCR 都有免费额度、国内拉取快。
+
+一定要用的话：`REGISTRY=docker.io`、`REGISTRY_NAMESPACE=你的用户名`，
+`IMAGE_PREFIX=docker.io/你的用户名/`。
+
+### 这套流程还没实测过
+
+我本机没法跑 GitHub Actions，工作流文件只做了**结构校验**（YAML 能解析、步骤齐全），
+**没有真正跑过一次推送到仓库**。第一次用的时候留意 Actions 页面的日志，
+大概率要调的就是仓库地址和凭据这两处。
 
 ## 备选：在 amd64 构建机（或 CI）上构建，再离线传输
 
@@ -285,6 +404,33 @@ proxy_buffering off;
 client_max_body_size 100m;
 ```
 
+### 5.5 客户端 IP 的传递（配额正确性的前提）
+
+接在 NPM 后面时，我们的 nginx 看到的 `$remote_addr` 是 **NPM 容器**的地址，不是用户地址。
+而配额是按客户端 IP 算的——不处理的话**所有访客共用一个配额桶**，
+第一个人的用量会算到所有人头上（现象：别人还没怎么用就被 429 拦掉）。
+
+`deploy/nginx.conf` 里已经用 realip 模块处理好了：
+
+```nginx
+set_real_ip_from 10.0.0.0/8;
+set_real_ip_from 172.16.0.0/12;
+set_real_ip_from 192.168.0.0/16;
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+```
+
+它把 `$remote_addr` 换成 X-Forwarded-For 里的真实客户端地址，后面的
+`proxy_set_header X-Real-IP $remote_addr` 就写对了。
+
+> ⚠️ **安全前提**：这段配置信任的是**内网网段**。攻击者只要能直接连到前端容器的 80 端口，
+> 就能伪造 `X-Forwarded-For` 绕过按 IP 的配额。所以配合 NPM 部署时
+> **`WEB_PORT` 必须绑回环**（`127.0.0.1:8088`），不要发布到公网。
+>
+> 实测验证方法（在服务器上执行，会真实调用一次模型）：
+> 带 `X-Forwarded-For: 203.0.113.99` 发一轮对话，然后查 `usage_records` 表，
+> `client_ip` 应该就是 `203.0.113.99`；如果记的是 `172.x.x.x`（容器网段），说明没生效。
+
 ### 6. 之后每次重新部署
 
 重建 frontend 容器后，它的 IP 可能变化。nginx 类代理会在启动时把上游 IP 缓存住，
@@ -316,7 +462,29 @@ gunzip -c backup-2026-09-30.sql.gz | docker compose exec -T mysql \
 
 ## 更新与回滚
 
-镜像用 `IMAGE_TAG` 打标签，**回滚就是换标签**（下面的命令都实测跑过）：
+**源码走 git 时（推荐），更新和回滚都是切提交**，比镜像打标签简单得多：
+
+```bash
+# ---- 更新 ----
+# 本机
+git add -A && git commit -m "..." && git push
+# 服务器
+cd /opt/interpace && git pull
+docker compose build && docker compose up -d
+./deploy/smoke-test.sh          # 冒烟过了才算更新成功
+
+# ---- 回滚 ----
+git log --oneline -5            # 找到上一个能用的提交
+git checkout <那个提交>
+docker compose build && docker compose up -d
+./deploy/smoke-test.sh
+# 想回到最新：git checkout main（或你的分支名）
+```
+
+### 用镜像标签回滚（离线传输那套才需要）
+
+如果走的是"amd64 构建机 + 离线传镜像"，镜像用 `IMAGE_TAG` 打标签，**回滚就是换标签**
+（下面的命令也实测跑过）：
 
 ```bash
 # 发版：本机构建带新标签的镜像 → 传到服务器 → 改 .env → up

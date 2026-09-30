@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import { downloadResumeWord } from '@/api/resume'
+import { notifyError } from '@/utils/errorMessage'
 
 const props = defineProps<{
   /** 包含「优化后的简历」的助手消息 ID */
@@ -18,7 +19,7 @@ const handleDownload = async () => {
     const fileName = await downloadResumeWord(props.messageId)
     ElMessage.success(`已导出 ${fileName}`)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导出失败，请稍后重试')
+    notifyError(error, '导出失败，请稍后重试')
   } finally {
     downloading.value = false
   }

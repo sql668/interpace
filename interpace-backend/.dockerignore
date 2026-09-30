@@ -32,6 +32,6 @@ tests/
 prompt.md
 env.example
 
-# Docker 相关自身
-Dockerfile
-.dockerignore
+# 注意：**不要**在这里排除 Dockerfile 和 .dockerignore。
+# 它们本来就不会被 COPY 进镜像（Dockerfile 里只 COPY app/alembic/scripts/config 这些明确路径），
+# 排除它们省不到任何体积，反而在换构建工具时容易踩到"读不到 Dockerfile"的怪问题。

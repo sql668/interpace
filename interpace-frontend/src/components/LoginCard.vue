@@ -80,6 +80,7 @@ import { setTokens } from '../api/token'
 import { useUserStore } from '../stores/user'
 import { uploadAvatar } from '../api/upload' // 导入新的上传函数
 import logoUrl from '../assets/image/logo.png'
+import { notifyError } from '@/utils/errorMessage'
 
 // --- 响应式状态定义 ---
 const activeTab = ref<'login' | 'register'>('login')
@@ -211,12 +212,9 @@ async function handleSubmit() {
             router.replace(resolvePostLoginPath())
         }
     } catch (err: any) {
-        const msg =
-            err?.response?.data?.message ||
-            err?.response?.data?.detail ||
-            err?.message ||
-            '请求失败，请稍后再试'
-        ElMessage.error(msg)
+        // 交给统一助手：它会优先用后端的中文 message，
+        // 并且跳过 `http.ts` 拦截器已经提示过的错误（避免一次失败弹两个框）。
+        notifyError(err, '请求失败，请稍后再试')
     } finally {
         isSubmitting.value = false
     }
