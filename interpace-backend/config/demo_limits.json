@@ -10,9 +10,9 @@
   "per_ip": {
     "_说明": "按客户端 IP 的限制。token 是「累计总量」，永不重置；其余都是「每日」计数，第二天零点自动清零。",
     "_token_quota": "每个 IP 累计可消耗的 token 总量（把输入、输出、推理 token 全算进去）。这是硬天花板，用完了这个 IP 就再也用不了。",
-    "token_quota": 3000000,
+    "token_quota": 5000000,
     "_turns_per_day": "每个 IP 每天最多几轮对话（一次提问到回答完算一轮）。",
-    "turns_per_day": 10,
+    "turns_per_day": 6,
     "_quizzes_per_day": "每个 IP 每天最多提交几次答卷（评分要调模型）。",
     "quizzes_per_day": 2,
     "_evaluations_per_day": "每个 IP 每天最多生成几次面试复盘。",

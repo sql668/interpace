@@ -141,12 +141,35 @@ git add -A && git commit -m "..." && git push
 
 # ---- 服务器 ----
 cd /opt/interpace
-git pull
-docker compose build            # 只重建有变化的镜像（Docker 层缓存会跳过没变的）
-docker compose up -d
-docker compose ps
-./deploy/smoke-test.sh          # 冒烟过了才算更新成功
+
+# 省事的技巧：把"要叠加的 compose 文件"写进环境变量，
+# 之后所有 docker compose 命令都不用再写一长串 -f（接 NPM 的场景特别需要）
+export COMPOSE_FILE=docker-compose.yml:docker-compose.npm.yml
+# 想每次登录都生效就写进 ~/.bashrc：echo 'export COMPOSE_FILE=...' >> ~/.bashrc
+
+git pull                          # 拉代码
+docker compose build              # 重建镜像（没变的层会走缓存，很快）
+docker compose up -d              # 用新镜像重启容器
+docker compose ps                 # 全都 healthy 才算成功
+
+# 冒烟：过了才算更新完成
+docker compose exec -T backend python /app/scripts/smoke_test.py \
+  --base-url http://frontend/api/v1 --health-base http://frontend
 ```
+
+**怎么判断"要不要重建镜像"**（决定这次更新快不快）：
+
+| 改了什么 | 要不要重建 | 说明 |
+| --- | --- | --- |
+| 前端源码 / `interpace-frontend/deploy/nginx.conf` | **要重建前端** | 静态产物和 Nginx 配置都烤进镜像里了 |
+| 后端 `app/` 代码 / `pyproject.toml` | 要重建后端 | 没改的部分会走层缓存，很快 |
+| `config/demo_limits.json` | 要重建后端 | 它是 COPY 进镜像的（想热改就挂载，见上文） |
+| `docker-compose*.yml` / `.env` | **不用重建** | compose 文件是运行时读的，`git pull` 后直接 `up -d` 就生效 |
+| `docs/` 下的文档 | 不用 | 只是文档 |
+| `alembic/versions/` 新增迁移 | 不用手动跑 | 后端容器启动时的 entrypoint 会自动 `alembic upgrade head` |
+
+> 判断方法：`git pull` 之后 `git diff --stat HEAD@{1}` 看一眼改了哪些目录，
+> 对照上面这张表即可。全量 `docker compose build` 也不会做无用功——Docker 层缓存会跳过没变的。
 
 回滚到上一个提交：
 
@@ -314,8 +337,10 @@ docker compose ps
 
 MinIO 的官方镜像地址这几年一直在变，**没有一个"永远能拉到"的地址**：
 
-- `minio/minio:latest`（Docker Hub）：有的网络能拉，有的直接报
-  `repository does not exist or may require 'docker login'`
+- `minio/minio:latest`（Docker Hub）：**有的网络能拉，有的直接报
+  `repository does not exist or may require 'docker login'`**
+  —— 实测：腾讯云的那台服务器**可以正常拉到**（amd64），
+  而开发用的 Apple Silicon 机器上拉不到。所以这条完全取决于你的网络，先试一次最省事
 - `quay.io/minio/minio:latest`：官方现在主推，但**匿名拉取会被拒**（`unauthorized`），
   需要先 `docker login quay.io`（免费账号）
 
@@ -341,11 +366,14 @@ echo 'MINIO_IMAGE=quay.io/minio/minio:latest' >> .env
 > 所以**结论仍然是先留着 MinIO**——只是取镜像这一步得按上面的顺序挑一个能用的源。
 ## 端口与网络
 
-**只有 frontend 发布端口，其余服务只在容器网络内可达。**
+**对公网发布端口的只有 frontend，其余服务只在容器网络内可达。**
 
 这不是洁癖：后端一旦能被公网直连，配额与限流依赖的"客户端 IP 从哪来"就不成立了
 （nginx 会覆盖写 `X-Real-IP`，直连时没人写）。所以 `docker-compose.yml` 里
 backend / mysql / redis / minio 都**刻意不写 `ports`**。
+
+> 例外：`mysql` 发布了一个 **回环**端口（`127.0.0.1:3307`），只是为了让你能连上去查数据
+> （见下面"想连数据库查数据"）。绑回环意味着外网连不到，不影响上面这条原则。
 
 对外端口由 `WEB_PORT` 控制（默认 80）。本机验证时用 `WEB_PORT=8080` 避开系统占用。
 
@@ -398,11 +426,27 @@ docker compose -f docker-compose.yml -f docker-compose.npm.yml up -d
 # 1) SSE 流式对话必须关掉代理缓冲。
 #    不关的话，前端打字机效果会变成"憋很久，然后一次性冒出一大段"。
 proxy_buffering off;
+proxy_cache off;
 
 # 2) 上传附件的体积上限。NPM 默认只有 1MB，传 PDF/录音会直接 413——
 #    注意我们自己的 Nginx 里虽然配了 100m，但请求会先被 NPM 拦下。
 client_max_body_size 100m;
+
+# 3) 慢接口的读超时。NPM 默认只有几十秒，而我们这几条是"一次模型调用"级别的慢：
+#    生成复盘 / 按录音复盘 / 提交答卷评分 —— 模型慢的时候会超过它，
+#    表现是 **504**（而且我们内部 Nginx 配的 300s 排在后面，轮不到生效）。
+proxy_read_timeout 300s;
+proxy_send_timeout 300s;
 ```
+
+**不要在这里重复配 `Upgrade` / `Connection` 那两个头**——面板上勾了 "Websockets Support"
+NPM 会自动加，重复写反而可能覆盖掉它的写法。同样也不要自己配 `X-Forwarded-For`：
+让 NPM 用它默认的（会追加真实客户端 IP），再由我们内部的 Nginx 用 realip 还原（见 5.5）。
+
+> **关于 `chishin/nginx-proxy-manager-zh`**：它是 NPM 的中文汉化分支（同一套上游），
+> Proxy Host 的字段、Advanced 面板、Websockets 开关**完全一样**，上面这些配置照抄即可。
+> 唯一区别是它可能落后上游几个版本，但这里用到的
+> `proxy_buffering` / WebSocket / realip 都是很老的特性，不受影响。
 
 ### 5.5 客户端 IP 的传递（配额正确性的前提）
 
@@ -423,9 +467,16 @@ real_ip_recursive on;
 它把 `$remote_addr` 换成 X-Forwarded-For 里的真实客户端地址，后面的
 `proxy_set_header X-Real-IP $remote_addr` 就写对了。
 
-> ⚠️ **安全前提**：这段配置信任的是**内网网段**。攻击者只要能直接连到前端容器的 80 端口，
-> 就能伪造 `X-Forwarded-For` 绕过按 IP 的配额。所以配合 NPM 部署时
-> **`WEB_PORT` 必须绑回环**（`127.0.0.1:8088`），不要发布到公网。
+> **安全说明（实测过）**：`set_real_ip_from` 是**按对端地址**校验的——只有来自这些网段的
+> 请求，它带的 `X-Forwarded-For` 才会被采信。所以**从公网直连过来的请求伪造不了 IP**
+> （对端不在信任表里 → XFF 被忽略 → `$remote_addr` 就是真实来源）。
+>
+> 实测方式：把信任表改成只含 `10.0.0.0/8`，然后分别从宿主机（对端 192.168.65.1）和
+> 另一个容器（对端 172.27.0.5）带 `X-Forwarded-For: 203.0.113.99` 发请求，
+> 两次 `$remote_addr` 都是真实对端 ✅。
+>
+> 仍然建议配合 NPM 部署时把 `WEB_PORT` **绑回环**（`127.0.0.1:8088`）：
+> 不是必须，但少一个对外端口就少一类风险——它真正要防的是"内网里有不受控的设备能连到它"。
 >
 > 实测验证方法（在服务器上执行，会真实调用一次模型）：
 > 带 `X-Forwarded-For: 203.0.113.99` 发一轮对话，然后查 `usage_records` 表，
@@ -459,6 +510,64 @@ gunzip -c backup-2026-09-30.sql.gz | docker compose exec -T mysql \
 ```
 
 **实测过**：`docker compose down` 之后再 `up -d`，登录 token 仍然可用、历史消息仍在。
+
+## 想连数据库查数据
+
+### 方式一：直接在服务器上敲（最省事，不用改任何配置）
+
+```bash
+cd /opt/interpace
+docker compose exec mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" inter-pace
+
+# 或者一条命令查完就走：
+docker compose exec mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" inter-pace \
+  -e "select id, username, create_time from users order by id desc limit 5;"
+```
+
+（容器里本来就有 `MYSQL_ROOT_PASSWORD` 这个环境变量，不用手打密码。）
+
+### 方式二：用图形客户端（Navicat / DBeaver / TablePlus）
+
+compose 里 MySQL **只绑在宿主机回环**（`127.0.0.1:3307`），所以**走 SSH 隧道**连——
+不用动云服务器防火墙：
+
+```bash
+# 在你自己电脑上执行，保持这个窗口开着
+ssh -N -L 3307:127.0.0.1:3307 root@<服务器IP>
+```
+
+然后客户端这样填：
+
+| 字段 | 值 |
+| --- | --- |
+| 主机 | `127.0.0.1` |
+| 端口 | `3307` |
+| 用户名 | `root` |
+| 密码 | `.env` 里的 `MYSQL_ROOT_PASSWORD` |
+| 数据库 | `inter-pace` |
+
+Navicat 也可以把 SSH 填在它的 **SSH 标签**里（主机 = 服务器 IP、用户 root），
+那样不用单独开终端，MySQL 标签照样填 `127.0.0.1:3307`。
+
+### 为什么默认绑回环，而不是 `0.0.0.0`
+
+绑回环时**只有能登录这台服务器的人**连得到，外网扫不到。数据库挂公网是很实际的风险：
+扫描器几小时内就会找上来，而 MySQL 是"拿到密码就全库"的服务，多一层 SSH 划算得多。
+
+### 真要改成公网直连（不推荐）
+
+编辑 `docker-compose.yml`，把那行改成：
+
+```yaml
+    ports:
+      - "0.0.0.0:${MYSQL_HOST_PORT:-3307}:3306"
+```
+
+然后**必须在云服务器防火墙里只放行你自己的 IP**（别用 `0.0.0.0/0`），
+并确认 `MYSQL_ROOT_PASSWORD` 是强随机值。改完 `docker compose up -d mysql` 生效。
+
+> 宿主端口默认用 **3307** 而不是 3306，是为了避开服务器上可能已经存在的本机 MySQL。
+> 端口被占用时换一个：`MYSQL_HOST_PORT=33306 docker compose up -d mysql`。
 
 ## 更新与回滚
 
