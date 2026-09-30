@@ -17,7 +17,9 @@ from app.services.prompt_template_service import (
     prompt_template_manager,
 )
 
-router = APIRouter(prefix="/prompt", tags=["prompt_management"])
+# 前缀由 main.py 统一挂载（`prefix="/prompt"`）。这里再写一次会叠成
+# `/prompt/prompt/...`，与 prompt.md 里登记的接口路径不一致。
+router = APIRouter(tags=["prompt_management"])
 
 
 @router.get("/templates/{agent_name}/{scene}", response_model=StandardResponse, summary="获取模板版本列表")
@@ -75,6 +77,10 @@ async def rollback_version(
                 detail="模板不存在",
             )
         return StandardResponse(code=0, message="回滚成功")
+    except HTTPException:
+        # HTTPException 也是 Exception，不单独放行就会被下面的兜底捕获，
+        # 把 404 变成 400（detail 还会被拼成"回滚模板失败: 404: 模板不存在"）。
+        raise
     except Exception as e:
         main_logger.error(f"回滚模板失败: {e}")
         raise HTTPException(

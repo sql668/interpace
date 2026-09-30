@@ -19,6 +19,8 @@ from app.schemas import (
     SessionListResponse,
     SessionUpdateTitleRequest,
     SessionUpdateTitleResponse,
+    StopStreamChatRequest,
+    StopStreamChatResponse,
     StreamChatRequest,
 )
 from app.services.chat_service import ChatService
@@ -151,8 +153,9 @@ async def stream_chat(
     db: DBSession,
     current_user: CurrentUser,
     session_model: Annotated[int, Query(ge=0, le=2, description="会话模式：0学习 1面试 2笔记")],
-    agent_name: Annotated[str, Query(description="智能体名称")] = "interview_host",
-    scene: Annotated[str, Query(description="业务场景")] = "interview",
+    # agent_name / scene 不传时由 select_model 查模式注册表决定，传了则以传入值优先。
+    agent_name: Annotated[str | None, Query(description="智能体名称；不传则按 select_model 解析")] = None,
+    scene: Annotated[str | None, Query(description="业务场景；不传则按 select_model 解析")] = None,
 ) -> StreamingResponse:
     """单 Agent 流式对话入口（SSE）。"""
     return StreamChatService.stream_chat(
@@ -165,6 +168,33 @@ async def stream_chat(
         provider=payload.provider,
         agent_name=agent_name,
         scene=scene,
+        segments=payload.segments,
+    )
+
+
+@router.post(
+    "/{session_id}/stream-chat/stop",
+    response_model=StopStreamChatResponse,
+    responses=common_error_responses,
+    summary="停止流式对话",
+)
+def stop_stream_chat(
+    session_id: Annotated[int, Path(gt=0, description="会话ID")],
+    payload: StopStreamChatRequest,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> StopStreamChatResponse:
+    """登记停止标志；流已自然结束时重复调用也不报错，保持幂等。"""
+    first_time = StreamChatService.stop_stream(
+        db=db,
+        user_id=current_user.id,
+        session_id=session_id,
+        message_id=payload.message_id,
+    )
+    return StopStreamChatResponse(
+        message="已请求停止生成" if first_time else "该消息此前已请求停止",
+        message_id=payload.message_id,
+        first_request=first_time,
     )
 
 
@@ -176,11 +206,13 @@ def delete_session(
     session_model: Annotated[int, Query(ge=0, le=2, description="会话模式：0学习 1面试 2笔记")],
 ) -> DeleteSessionResponse:
     """删除会话及关联数据，并返回删除统计信息。"""
-    deleted_messages, deleted_interviews, deleted_resources = ChatService.delete_session(
-        db=db,
-        user_id=current_user.id,
-        session_id=session_id,
-        session_model=session_model,
+    deleted_messages, deleted_interviews, deleted_resources, deleted_quizzes = (
+        ChatService.delete_session(
+            db=db,
+            user_id=current_user.id,
+            session_id=session_id,
+            session_model=session_model,
+        )
     )
     return DeleteSessionResponse(
         message="会话删除成功",
@@ -188,4 +220,5 @@ def delete_session(
         deleted_messages=deleted_messages,
         deleted_interviews=deleted_interviews,
         deleted_resources=deleted_resources,
+        deleted_quizzes=deleted_quizzes,
     )

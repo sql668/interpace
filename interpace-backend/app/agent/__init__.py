@@ -2,11 +2,11 @@
 
 from .llm import get_chat_model
 from .memory import build_chat_history_from_rows, get_latest_knowledge
-from .prompt_layer import build_stream_chain_context
+from .prompt_layer import build_stream_graph
 
 __all__ = [
     "get_chat_model",
     "build_chat_history_from_rows",
     "get_latest_knowledge",
-    "build_stream_chain_context",
+    "build_stream_graph",
 ]

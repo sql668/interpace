@@ -29,6 +29,14 @@ Python + FastAPI，REST 风格。
 - 配置通过环境变量读取（`pydantic-settings`），密钥不进仓库，提供 `.env.example`。
 - 时间统一用 UTC 存储，接口返回 ISO 8601 字符串。
 
+## 智能体开发
+
+- 智能体编排统一用 LangGraph，模型、提示词、工具、记忆统一用 LangChain；不要手写编排循环，也不要另造一套 Agent 框架。
+- 编排代码放 `app/agent/`，按场景拆分模块（如 `app/agent/scenes/quiz.py`），对外只暴露一个可执行入口。
+- 提示词一律走 `prompt_template_service` 读取模板，不在代码里硬编码长提示词。
+- 流式接口保持现有 SSE 事件格式（`start` / `delta` / `done` / `error`），编排层只负责产出增量文本。
+- 已声明依赖：`langchain`、`langchain-community`、`langchain-openai`、`langgraph`；新增其他智能体相关依赖先按根规则确认。
+
 ## 验证
 
 - 每个路由至少一个 `pytest` + `TestClient` 用例，覆盖正常路径和错误路径。
@@ -39,4 +47,3 @@ Python + FastAPI，REST 风格。
 - 依赖管理工具（uv / poetry / pip）与虚拟环境方案。
 - 数据库与 ORM（PostgreSQL + SQLAlchemy 之类）。
 - 认证方式（JWT / Session）与权限模型。
-- AI 模型调用的封装位置与流式返回方案。

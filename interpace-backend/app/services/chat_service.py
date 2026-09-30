@@ -6,7 +6,17 @@ from sqlalchemy.orm import Session
 
 from app.core import raise_error
 from app.core.logging_config import main_logger
-from app.db.models import ChatMessage, Interview, Resource, Session as SessionModel
+from app.db.models import (
+    ChatMessage,
+    Interview,
+    InterviewEvaluation,
+    ProfileProposal,
+    QuizPaper,
+    QuizQuestion,
+    Resource,
+    SessionSummary,
+    Session as SessionModel,
+)
 from app.schemas.chat_schemas import ChatMessageItem
 from app.services.minio_storage_service import MinioStorageService
 
@@ -60,6 +70,7 @@ class ChatService:
             ChatMessageItem(
                 id=row.id,
                 status=row.status,
+                select_model=row.select_model,
                 interview_id=row.interview_id,
                 request_text=row.request_text,
                 response_text=row.response_text,
@@ -76,7 +87,7 @@ class ChatService:
     @staticmethod
     def delete_session(
         db: Session, user_id: int, session_id: int, session_model: int | None = None
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int]:
         """
         删除会话与其关联消息/面试记录，并回收当前会话附件资源。
 
@@ -84,6 +95,7 @@ class ChatService:
         - deleted_messages: 删除消息数
         - deleted_interviews: 删除面试记录数
         - deleted_resources: 删除资源对象数（当前会话出现的 resource_id）
+        - deleted_quizzes: 删除题库卷数
         """
         ChatService._ensure_session_belongs_to_user(
             db=db, session_id=session_id, user_id=user_id, session_model=session_model
@@ -117,8 +129,43 @@ class ChatService:
         )
         # 删除面试记录
         interview_count = db.scalar(interview_count_stmt) or 0
+        # 复盘结果引用 interviews.id，必须先删，否则外键会挡住面试记录的删除（T8.2）
+        db.execute(
+            delete(InterviewEvaluation).where(
+                InterviewEvaluation.interview_id.in_(
+                    select(Interview.id).where(Interview.session_id == session_id)
+                )
+            )
+        )
         db.execute(delete(Interview).where(Interview.session_id == session_id))
+
+        # 题库：卷子的 message_id 指向 chat_messages、session_id 指向 sessions，
+        # 必须赶在消息与会话之前删，否则外键约束会直接挡住删除。
+        paper_ids = list(
+            db.scalars(select(QuizPaper.id).where(QuizPaper.session_id == session_id))
+        )
+        quiz_count = len(paper_ids)
+        if paper_ids:
+            # 先题目后卷子：quiz_questions.paper_id 指向 quiz_papers
+            db.execute(delete(QuizQuestion).where(QuizQuestion.paper_id.in_(paper_ids)))
+            db.execute(delete(QuizPaper).where(QuizPaper.id.in_(paper_ids)))
+
+        # 画像待确认记录同理：message_id 指向 chat_messages、session_id 指向 sessions，
+        # 也要赶在消息与会话之前删（T6.2）。
+        db.execute(
+            delete(ProfileProposal).where(ProfileProposal.session_id == session_id)
+        )
+
+        # 长会话摘要（T9.16）只引用 sessions，同样要先删，否则外键会挡住会话删除
+        db.execute(
+            delete(SessionSummary).where(SessionSummary.session_id == session_id)
+        )
+
         # 删除聊天消息
+        # 先清检索索引：它对来源不设外键，不显式清理就会留下「删掉的对话还能被搜到」的脏数据
+        from app.services.memory_search_service import MemorySearchService
+
+        MemorySearchService.delete_by_session(db, user_id=user_id, session_id=session_id)
         db.execute(
             delete(ChatMessage).where(
                 ChatMessage.session_id == session_id, ChatMessage.user_id == user_id
@@ -134,7 +181,7 @@ class ChatService:
         db.commit()
         # 删除对象存储文件
         ChatService._delete_storage_objects(resource_paths_to_delete)
-        return message_count, interview_count, deleted_resource_count
+        return message_count, interview_count, deleted_resource_count, quiz_count
 
     @staticmethod
     def _build_segments(raw_segments: list[dict] | None) -> list[dict]:

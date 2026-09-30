@@ -1,5 +1,8 @@
 import MarkdownIt from 'markdown-it'
-import Prism from 'prismjs'
+// 注意顺序：prism-setup 必须排在所有语言包**之前**。
+// 语言包引用的是全局 Prism，而 setup 负责把它挂上去（原因见该文件顶部注释）。
+// 这条顺序不能调换，否则生产构建会报 "ReferenceError: Prism is not defined"。
+import Prism from './prism-setup'
 
 // 导入代码高亮主题
 import 'prismjs/themes/prism-okaidia.css'

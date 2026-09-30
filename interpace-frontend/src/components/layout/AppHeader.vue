@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { School } from '@element-plus/icons-vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../../stores/user'
-import { clearTokens } from '../../api/token'
 import { env } from '@/config/env'
-
-// --- 类型定义 ---
-type NavTab = {
-    key: string
-    label: string
-}
+import { fetchResourceBlobByPath } from '@/api/resource'
+import fallbackAvatar from '@/assets/image/logo.png'
+import type { NavTab } from '@/constants/nav-tabs'
 
 // --- Props & Emits ---
 defineProps<{
@@ -21,27 +18,58 @@ const emit = defineEmits<{
     tabClick: [tabKey: string]
 }>()
 
-// --- 状态管理 ---
+// 品牌区可点回首页：这是"logo 点回首页"的通用约定，
+// 也是工作台里唯一能回到介绍页的入口（首页是公开页，点了不会被守卫拦）。
 const router = useRouter()
+
+// --- 状态管理 ---
 const userStore = useUserStore()
-const baseURL = import.meta.env.VITE_API_BASE_URL
+
+// 后端存的头像是 `minio://bucket/key` 路径，浏览器加载不了；而且资源接口需要
+// Authorization 头，`<img src>` 带不了。所以用 axios 取成 Blob 再转临时地址。
+const avatarUrl = ref('')
+
+const releaseAvatarUrl = () => {
+    if (avatarUrl.value) {
+        URL.revokeObjectURL(avatarUrl.value)
+        avatarUrl.value = ''
+    }
+}
+
+watch(
+    () => userStore.avatar,
+    async (storagePath) => {
+        releaseAvatarUrl()
+        if (!storagePath) {
+            return
+        }
+        try {
+            avatarUrl.value = URL.createObjectURL(await fetchResourceBlobByPath(storagePath))
+        } catch {
+            // 取不到就回退到默认头像，不打扰用户
+        }
+    },
+    { immediate: true }
+)
+
+onBeforeUnmount(releaseAvatarUrl)
 
 // --- 事件处理 ---
 function handleLogout() {
-    clearTokens() // clearTokens 会自动调用 userStore.clearUser()
-    router.replace('/login')
+    // clearUser 内部会清 token 并跳转登录页；只清 token 会让 store 里仍留着上一个账号的信息
+    userStore.clearUser()
 }
 </script>
 
 <template>
     <header class="app-header">
-        <!-- 品牌 Logo -->
-        <div class="brand">
+        <!-- 品牌 Logo：点击回到首页 -->
+        <button class="brand" type="button" title="回到首页" @click="router.push('/')">
             <span class="brand__icon">
                 <el-icon><School /></el-icon>
             </span>
             <span class="brand__name">{{ env.appTitle }}</span>
-        </div>
+        </button>
 
         <!-- 导航标签 -->
         <el-space :size="30">
@@ -59,12 +87,9 @@ function handleLogout() {
         <div class="header-actions">
             <el-dropdown v-if="userStore.isLoggedIn">
                 <div class="user-profile">
-                    <el-avatar
-                        :size="36"
-                        :src="userStore.avatar ? `${baseURL}/${userStore.avatar}` : ''">
-                        <!-- Fallback for avatar -->
-                        <img
-                            src="https://cube.elemecdn.com/e/fd/0fc7d20532fdaf769a25683617711png.png" />
+                    <el-avatar :size="36" :src="avatarUrl">
+                        <!-- 没头像或加载失败时用本地默认图，不再依赖第三方地址 -->
+                        <img :src="fallbackAvatar" alt="默认头像" />
                     </el-avatar>
                     <span class="username">{{ userStore.username }}</span>
                 </div>
@@ -115,6 +140,24 @@ function handleLogout() {
     display: flex;
     align-items: center;
     gap: 10px;
+    /* 它是个 button（为了能点回首页），所以要把浏览器默认样式清掉 */
+    padding: 0;
+    border: none;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+
+.brand:hover .brand__name,
+.brand:focus-visible .brand__name {
+    color: v.$brand-color;
+}
+
+.brand:focus-visible {
+    outline: 2px solid v.$brand-color;
+    outline-offset: 4px;
+    border-radius: 6px;
 }
 
 .brand__icon {

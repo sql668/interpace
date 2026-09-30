@@ -1,33 +1,66 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createSession, deleteSession, getSessionMessages, getSessions, updateSessionTitle } from '@/api/chat'
+import { createNote, deleteNote, getNoteDetail, getNotes, updateNote } from '@/api/note'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import SideBar from '@/components/layout/SideBar.vue'
 import NotebookEditor from '@/components/notebook/NotebookEditor.vue'
-import { tabs } from '@/composables/useRoomShell'
-import type { MessageSegment, SessionItem, SessionRecord } from '@/types/chat'
-// 笔记本固定使用会话模式 2。
-const SESSION_MODEL: 2 = 2
+import { useNoteAutoSave, type NoteSaveStatus } from '@/composables/useNoteAutoSave'
+import { tabs } from '@/constants/nav-tabs'
+import type { NoteDetail, NoteItem } from '@/types/note'
 
-type NoteDocument = {
-  title: string
-  content: string
-}
+const NOTE_PAGE_SIZE = 50
+/** 空笔记正文：wangEditor 用空段落表示「没有内容」 */
+const EMPTY_NOTE_CONTENT = '<p><br></p>'
+const FALLBACK_TITLE = '未命名笔记'
 
 const route = useRoute()
 const router = useRouter()
 
 const activeTab = ref('notebook')
-const sessions = ref<SessionItem[]>([])
-const activeSessionId = ref<number | null>(null)
-const loadingSessions = ref(false)
-const sessionPage = ref(1)
-const sessionPageSize = 20
-const sessionHasMore = ref(false)
+// 左侧列表（不含正文）与当前打开的笔记详情
+const notes = ref<NoteItem[]>([])
+const activeNoteId = ref<number | null>(null)
+const activeNote = ref<NoteDetail | null>(null)
+const loadingNotes = ref(false)
+const noteOffset = ref(0)
+const hasMoreNotes = ref(false)
 
-const notes = ref<Record<string, NoteDocument>>({})
+// ---- 自动保存：防抖 + 切换/卸载/页面隐藏时冲刷 + 请求串行化（见 D5）----
+const {
+  status: saveStatus,
+  schedule: scheduleSave,
+  flush: flushSave,
+  drop: dropSave,
+  resetStatus: resetSaveStatus
+} = useNoteAutoSave({
+  save: async (noteId, payload) => {
+    const updated = await updateNote(noteId, payload)
+    // 只同步左侧列表的标题，**不用服务端返回覆盖 activeNote**：
+    // 用户很可能已经在继续输入，覆盖会把新输入顶掉。
+    const index = notes.value.findIndex((item) => item.id === noteId)
+    if (index >= 0) {
+      notes.value[index] = {
+        ...notes.value[index],
+        title: updated.title,
+        updated_at: updated.updated_at
+      }
+    }
+  },
+  onError: (message) => ElMessage.error(message)
+})
+
+const saveStatusText = computed(() => {
+  const textByStatus: Record<NoteSaveStatus, string> = {
+    idle: '',
+    pending: '待保存…',
+    saving: '保存中…',
+    saved: '已保存',
+    error: '保存失败，继续编辑会自动重试'
+  }
+  return activeNote.value ? textByStatus[saveStatus.value] : ''
+})
 
 watch(
   () => route.path,
@@ -45,204 +78,147 @@ const handleTabClick = async (tabKey: string) => {
   await router.push(selectedTab.path)
 }
 
-const ensureNote = (sessionId: number, title = '未命名笔记') => {
-  // 本地兜底：保证编辑器总能拿到一个可编辑对象。
-  const key = String(sessionId)
-  if (!notes.value[key]) {
-    notes.value[key] = { title, content: '<p><br></p>' }
-  }
+// ---- 列表与详情 ----
+const openNote = async (noteId: number) => {
+  if (noteId === activeNoteId.value) return
+  // 切走之前先把上一篇的待提交改动送出去，否则防抖还没到点就丢了
+  flushSave()
+  activeNoteId.value = noteId
+  resetSaveStatus()
+  activeNote.value = await getNoteDetail(noteId)
 }
 
-const activeNote = computed(() => {
-  const id = activeSessionId.value
-  if (!id) {
-    return { title: '未命名笔记', content: '<p>请开始记录你的学习笔记...</p>' }
-  }
-  const current = notes.value[String(id)]
-  if (current) return current
-  return { title: '未命名笔记', content: '<p>请开始记录你的学习笔记...</p>' }
-})
-
-const escapeHtml = (value: string) =>
-  value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-
-const renderSegments = (segments: MessageSegment[]) => {
-  // 附件在笔记中以“链接列表”形式落盘，便于后续二次编辑。
-  if (!segments.length) return ''
-  const lines = segments.map((segment) => {
-    const label = segment.name || '未命名附件'
-    if (segment.url) {
-      return `<li><a href="${escapeHtml(segment.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a></li>`
-    }
-    return `<li>${escapeHtml(label)}</li>`
-  })
-  return `<ul>${lines.join('')}</ul>`
-}
-
-const mapMessagesToNoteContent = (messages: SessionRecord[]) => {
-  // 将聊天记录整理为可编辑的 HTML 初稿，作为笔记初始内容。
-  if (!messages.length) {
-    return '<p>当前会话暂无聊天记录，可直接开始记录笔记。</p>'
-  }
-  const sorted = [...messages].sort((a, b) => a.created_at - b.created_at)
-  const blocks = sorted.map((item) => {
-    const userText = item.request_text ? `<p><strong>用户：</strong>${escapeHtml(item.request_text)}</p>` : ''
-    const userSegments = renderSegments(item.request_segments || [])
-    const assistantText = item.response_text ? `<p><strong>AI：</strong>${escapeHtml(item.response_text)}</p>` : ''
-    const assistantSegments = renderSegments(item.response_segments || [])
-    return `${userText}${userSegments}${assistantText}${assistantSegments}`
-  })
-  return blocks.join('<hr/>')
-}
-
-const loadSessionNoteFromMessages = async (sessionId: number, title: string) => {
-  // 读取会话消息并生成笔记初稿；上限 10 页避免单次请求过大。
-  let page = 1
-  const pageSize = 20
-  let hasMore = true
-  const all: SessionRecord[] = []
-  while (hasMore && page <= 10) {
-    const data = await getSessionMessages(sessionId, {
-      page,
-      page_size: pageSize,
-      session_model: SESSION_MODEL
-    })
-    all.push(...data.messages)
-    hasMore = data.has_more
-    page += 1
-  }
-  notes.value[String(sessionId)] = {
-    title,
-    content: mapMessagesToNoteContent(all)
-  }
-}
-
-const loadSessions = async (reset = false) => {
-  if (loadingSessions.value) return
-  loadingSessions.value = true
+const loadNotes = async (reset = false) => {
+  if (loadingNotes.value) return
+  loadingNotes.value = true
   try {
     if (reset) {
-      sessions.value = []
-      sessionPage.value = 1
+      notes.value = []
+      noteOffset.value = 0
     }
-    const data = await getSessions({
-      page: sessionPage.value,
-      page_size: sessionPageSize,
-      session_model: SESSION_MODEL
-    })
-    sessions.value = reset ? data.sessions : [...sessions.value, ...data.sessions]
-    sessionHasMore.value = data.has_more
-    sessionPage.value += 1
-    const first = sessions.value[0]
-    if (!activeSessionId.value && first) {
-      activeSessionId.value = first.id
-      // 首屏默认把首会话消息转为笔记内容。
-      await loadSessionNoteFromMessages(first.id, first.title)
+    const data = await getNotes({ limit: NOTE_PAGE_SIZE, offset: noteOffset.value })
+    notes.value = reset ? data.items : [...notes.value, ...data.items]
+    noteOffset.value += data.items.length
+    hasMoreNotes.value = notes.value.length < data.total
+    const first = notes.value[0]
+    if (!activeNoteId.value && first) {
+      await openNote(first.id)
     }
   } finally {
-    loadingSessions.value = false
+    loadingNotes.value = false
   }
 }
 
-const createNewSession = async () => {
+// ---- 增删改 ----
+const createNewNote = async () => {
   try {
-    const promptResult = (await ElMessageBox.prompt('请输入笔记主题标题', '新建笔记', {
+    const promptResult = (await ElMessageBox.prompt('请输入笔记标题', '新建笔记', {
       inputValue: '新笔记',
       inputPattern: /.+/,
       inputErrorMessage: '标题不能为空'
     })) as { value: string }
-    const result = await createSession({ title: promptResult.value.trim(), session_model: 2 })
-    sessions.value.unshift(result.session)
-    activeSessionId.value = result.session.id
-    await loadSessionNoteFromMessages(result.session.id, result.session.title)
+    flushSave()
+    const created = await createNote({
+      title: promptResult.value.trim(),
+      content: EMPTY_NOTE_CONTENT
+    })
+    notes.value = [created, ...notes.value]
+    activeNoteId.value = created.id
+    activeNote.value = created
+    resetSaveStatus()
   } catch {
     // 用户取消时不提示
   }
 }
 
-const handleSessionClick = async (id: number | string) => {
-  const sessionId = Number(id)
-  if (Number.isNaN(sessionId)) return
-  activeSessionId.value = sessionId
-  const target = sessions.value.find((item) => item.id === sessionId)
-  await loadSessionNoteFromMessages(sessionId, target?.title ?? '未命名笔记')
-}
-
-const editSessionTitle = async (id: number | string) => {
-  const sessionId = Number(id)
-  const target = sessions.value.find((item) => item.id === sessionId)
+const editNoteTitle = async (id: number | string) => {
+  const noteId = Number(id)
+  const target = notes.value.find((item) => item.id === noteId)
   if (!target) return
   try {
-    const promptResult = (await ElMessageBox.prompt('请输入新的会话标题', '编辑标题', {
+    const promptResult = (await ElMessageBox.prompt('请输入新的笔记标题', '编辑标题', {
       inputValue: target.title,
       inputPattern: /.+/,
       inputErrorMessage: '标题不能为空'
     })) as { value: string }
-    const result = await updateSessionTitle(sessionId, { title: promptResult.value.trim() }, SESSION_MODEL)
-    const index = sessions.value.findIndex((item) => item.id === sessionId)
-    if (index >= 0) sessions.value[index] = result.session
-    const current = notes.value[String(sessionId)]
-    if (current) current.title = result.session.title
-    ElMessage.success('会话标题已更新')
+    const updated = await updateNote(noteId, { title: promptResult.value.trim() })
+    const index = notes.value.findIndex((item) => item.id === noteId)
+    if (index >= 0) notes.value[index] = { ...notes.value[index], title: updated.title }
+    if (activeNoteId.value === noteId && activeNote.value) {
+      activeNote.value = { ...activeNote.value, title: updated.title }
+    }
   } catch {
     // 用户取消时不提示
   }
 }
 
-const removeSession = async (id: number | string) => {
-  const sessionId = Number(id)
-  const target = sessions.value.find((item) => item.id === sessionId)
+const removeNote = async (id: number | string) => {
+  const noteId = Number(id)
+  const target = notes.value.find((item) => item.id === noteId)
   if (!target) return
   try {
-    await ElMessageBox.confirm(`确认删除会话「${target.title}」吗？`, '删除会话', {
-      type: 'warning'
+    await ElMessageBox.confirm(`确认删除笔记「${target.title}」吗？`, '删除笔记', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
     })
-    await deleteSession(sessionId, SESSION_MODEL)
-    sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-    delete notes.value[String(sessionId)]
-    if (activeSessionId.value === sessionId) {
-      const next = sessions.value[0]
-      activeSessionId.value = next ? next.id : null
-      if (next) await loadSessionNoteFromMessages(next.id, next.title)
+    // 先丢弃待提交内容，否则删完还会补发一次保存请求、拿到 404
+    dropSave(noteId)
+    await deleteNote(noteId)
+    notes.value = notes.value.filter((item) => item.id !== noteId)
+    if (activeNoteId.value === noteId) {
+      activeNoteId.value = null
+      activeNote.value = null
+      const next = notes.value[0]
+      if (next) await openNote(next.id)
     }
-    ElMessage.success('会话已删除')
+    ElMessage.success('笔记已删除')
   } catch {
     // 用户取消时不提示
   }
 }
 
-const updateNoteTitle = (value: string) => {
-  const id = activeSessionId.value
-  if (!id) return
-  const session = sessions.value.find((item) => item.id === id)
-  if (session) session.title = value || '未命名笔记'
-  ensureNote(id, value || '未命名笔记')
-  const note = notes.value[String(id)]
-  if (note) {
-    note.title = value || '未命名笔记'
-  }
+// ---- 编辑器输入：先更新本地，再交给自动保存 ----
+const handleTitleChange = (value: string) => {
+  const note = activeNote.value
+  // 正在切换笔记（详情还没回来）时忽略，避免把上一篇的内容写到新笔记上
+  if (!note || note.id !== activeNoteId.value) return
+  const title = value || FALLBACK_TITLE
+  activeNote.value = { ...note, title }
+  const index = notes.value.findIndex((item) => item.id === note.id)
+  if (index >= 0) notes.value[index] = { ...notes.value[index], title }
+  scheduleSave(note.id, { title })
 }
 
-const updateNoteContent = (value: string) => {
-  const id = activeSessionId.value
-  if (!id) return
-  ensureNote(id)
-  const note = notes.value[String(id)]
-  if (note) {
-    note.content = value
+const handleContentChange = (value: string) => {
+  const note = activeNote.value
+  if (!note || note.id !== activeNoteId.value) return
+  // wangEditor 在 setHtml 之后也会触发一次 onChange，值没变就跳过，避免自我循环
+  if (note.content === value) return
+  activeNote.value = { ...note, content: value }
+  scheduleSave(note.id, { content: value })
+}
+
+// ---- 生命周期 ----
+// 页面被隐藏（切标签页 / 最小化）时立即冲刷，兜住「防抖还没到点就切走」
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'hidden') {
+    flushSave()
   }
 }
 
 onMounted(async () => {
-  await loadSessions(true)
-  while (sessionHasMore.value && sessions.value.length < 500) {
-    await loadSessions(false)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  await loadNotes(true)
+  // 侧边栏没有分页控件，这里把列表补齐（与学习室 / 面试间的做法一致）
+  while (hasMoreNotes.value && notes.value.length < 500) {
+    await loadNotes(false)
   }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  flushSave()
 })
 </script>
 
@@ -251,18 +227,21 @@ onMounted(async () => {
     <AppHeader :tabs="tabs" :active-tab="activeTab" @tab-click="handleTabClick" />
     <div class="notebook-room__content">
       <SideBar
-        :sessions="sessions"
-        :active-session-id="activeSessionId ?? ''"
-        @create-session="createNewSession"
-        @session-click="handleSessionClick"
-        @edit-session="editSessionTitle"
-        @remove-session="removeSession"
+        :sessions="notes"
+        :active-session-id="activeNoteId ?? ''"
+        create-label="新建笔记"
+        section-title="历史笔记"
+        @create-session="createNewNote"
+        @session-click="openNote(Number($event))"
+        @edit-session="editNoteTitle"
+        @remove-session="removeNote"
       />
       <NotebookEditor
-        :title="activeNote.title"
-        :content="activeNote.content"
-        @update-title="updateNoteTitle"
-        @update-content="updateNoteContent"
+        :title="activeNote?.title ?? ''"
+        :content="activeNote?.content ?? EMPTY_NOTE_CONTENT"
+        :status-text="saveStatusText"
+        @update-title="handleTitleChange"
+        @update-content="handleContentChange"
       />
     </div>
   </div>

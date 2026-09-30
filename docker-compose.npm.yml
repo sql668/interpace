@@ -1,0 +1,25 @@
+# 叠在 docker-compose.yml 之上，用于"服务器上已经跑着 Nginx Proxy Manager"的场景。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.npm.yml up -d
+#
+# 作用：把 frontend 容器**同时接入 NPM 所在的 docker 网络**，
+# 这样 NPM 里新建 Proxy Host 时，Forward Hostname 直接写容器名 `interpace-frontend`、
+# 端口 `80` 就行——不用去猜宿主机的 IP，也不用把端口暴露到公网。
+#
+# 为什么要单独一个文件而不是写进主文件：`external: true` 的网络**必须已经存在**，
+# 否则 `docker compose up` 会直接报错。本机开发（以及不用 NPM 的部署）没有这个网络，
+# 所以做成可选叠加，默认流程不受影响。
+
+services:
+  frontend:
+    networks:
+      - interpace
+      - npm
+
+networks:
+  npm:
+    external: true
+    # 服务器上 NPM 实际所在的网络名，在 .env 里设置。
+    # 查看方式：docker inspect <npm容器名> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+    name: ${NPM_NETWORK:?请在 .env 里设置 NPM_NETWORK（Nginx Proxy Manager 所在的 docker 网络名）}

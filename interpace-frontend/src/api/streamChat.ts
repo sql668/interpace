@@ -1,10 +1,24 @@
 ﻿import { getAccessToken } from './token'
 
+import { env } from '@/config/env'
+
+import type { MessageSegment } from '@/types/chat'
+
 // 与后端约定的 SSE 消息类型
 type StreamEvent =
   | { type: 'start'; message_id: number }
   | { type: 'delta'; text: string }
-  | { type: 'done'; response_text: string }
+  // 末尾三个字段是后端在流结束时附带的结构化产物（没有就是 null）：
+  // quiz_paper_id 出题（T5.5）、profile_proposal_id 画像待确认（T6.2）、
+  // interview_id 模拟面试记录（T7.4）。
+  | {
+      type: 'done'
+      response_text: string
+      stopped?: boolean
+      quiz_paper_id?: number | null
+      profile_proposal_id?: number | null
+      interview_id?: number | null
+    }
   | { type: 'error'; message: string }
 
 // 发起流式请求所需参数
@@ -14,6 +28,10 @@ type StreamChatOptions = {
   requestText: string
   selectModel?: number
   provider?: string
+  /** 本轮携带的附件段（文件 / 图片 / 音频），会原样落到 request_segments */
+  segments?: MessageSegment[]
+  /** 用于「停止生成」时中断底层请求 */
+  signal?: AbortSignal
   onEvent: (event: StreamEvent) => void
 }
 
@@ -51,9 +69,8 @@ async function readErrorMessage(response: Response): Promise<string> {
 
 // 发起流式对话
 export async function streamChat(options: StreamChatOptions): Promise<void> {
-    const base = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '/api'
-    const baseUrl = base.endsWith('/') ? base.slice(0, -1) : base
-    const url = `${baseUrl}/sessions/${options.sessionId}/stream-chat?session_model=${options.sessionModel}`
+    // env.apiBaseUrl 已做过去尾斜杠处理，也不再需要 '/api' 兜底
+    const url = `${env.apiBaseUrl}/sessions/${options.sessionId}/stream-chat?session_model=${options.sessionModel}`
 
     const token = getAccessToken()
     const response = await fetch(url, {
@@ -65,8 +82,10 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
       body: JSON.stringify({
         request_text: options.requestText,
         select_model: options.selectModel ?? 0,
-        provider: options.provider ?? 'deepseek'
-      })
+        provider: options.provider ?? 'deepseek',
+        segments: options.segments ?? []
+      }),
+      signal: options.signal
     })
 
     if (!response.ok || !response.body) {

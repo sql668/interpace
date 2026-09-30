@@ -5,7 +5,7 @@
             <div class="brand-icon" aria-hidden="true">
                 <img class="brand-icon__img" :src="logoUrl" alt="logo" />
             </div>
-            <div class="brand-title">学面通AI</div>
+            <div class="brand-title">面途AI</div>
         </div>
 
         <el-upload
@@ -89,6 +89,25 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore() // 获取 user store 实例
 const isSubmitting = ref(false) // 防止重复提交
+
+/**
+ * 登录成功后的落点。
+ *
+ * 带 `?redirect=` 就回原目标页（用户是被守卫拦下来的，想去的地方要还原）；
+ * 没有就进**首页**——刚登录的人先看到"这是什么、演示环境有什么限制、怎么用"，
+ * 比直接掉进工作台更合理，首页右上角再把他送进工作台。
+ *
+ * `redirect` 是能被随便构造的（它直接来自地址栏），所以**只接受站内路径**：
+ * 必须以单个 `/` 开头。挡掉 `//evil.com` 这类协议相对地址——
+ * 不挡的话就成了一个开放重定向，能被人拿去钓鱼。
+ */
+const resolvePostLoginPath = (): string => {
+    const target = route.query.redirect
+    if (typeof target === 'string' && target.startsWith('/') && !target.startsWith('//')) {
+        return target
+    }
+    return '/'
+}
 
 const form = reactive({
     account: '',
@@ -175,24 +194,21 @@ async function handleSubmit() {
             // 3. 如果有头像，则上传头像
             if (avatarFile.value) {
                 const res = await uploadAvatar(avatarFile.value)
-                userStore.updateUserAvatar(res.avatar_url) // 更新全局状态
+                // 后端返回的是 file_path（上传接口没有 avatar_url 字段）
+                userStore.updateUserAvatar(res.file_path)
             }
 
             // 4. 获取用户信息并跳转
             await userStore.fetchUser() // 拉取并更新用户信息
             ElMessage.success('欢迎您！已成功登录')
-            const redirect =
-                typeof route.query.redirect === 'string' ? route.query.redirect : '/interview-room'
-            router.replace(redirect)
+            router.replace(resolvePostLoginPath())
         } else {
             // --- 执行登录流程 ---
             const token = await login({ username: form.account, password: form.password })
             setTokens(token)
             await userStore.fetchUser() // 拉取并更新用户信息
             ElMessage.success('登录成功')
-            const redirect =
-                typeof route.query.redirect === 'string' ? route.query.redirect : '/interview-room'
-            router.replace(redirect)
+            router.replace(resolvePostLoginPath())
         }
     } catch (err: any) {
         const msg =

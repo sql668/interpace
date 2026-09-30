@@ -1,17 +1,25 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import MessageBubble from './MessageBubble.vue'
+import type { ProfileProposalItem } from '@/types/profile'
 import type { UiMessage } from '@/types/chat'
 
 const props = defineProps<{
   messages: UiMessage[]
   hasMore?: boolean
   loadingMore?: boolean
+  /** message_id -> paper_id 映射，透传到气泡用于渲染答题卡片 */
+  quizPapers?: Record<number, number>
+  /** message_id -> 画像待确认记录，透传到气泡用于渲染确认卡片 */
+  profileProposals?: Record<number, ProfileProposalItem>
 }>()
 
 const emit = defineEmits<{
   loadMore: []
   openInterview: [interviewId: number]
+  saveToNote: [messageId: number]
+  explainTopics: [topics: string[]]
+  profileUpdated: [proposal: ProfileProposalItem]
 }>()
 
 const listRef = ref<HTMLElement | null>(null)
@@ -102,7 +110,12 @@ watch(lastMessageLength, async () => {
         v-for="message in props.messages"
         :key="message.id"
         :message="message"
+        :quiz-papers="props.quizPapers"
+        :profile-proposals="props.profileProposals"
         @open-interview="emit('openInterview', $event)"
+        @save-to-note="emit('saveToNote', $event)"
+        @explain-topics="emit('explainTopics', $event)"
+        @profile-updated="emit('profileUpdated', $event)"
       />
     </div>
   </section>

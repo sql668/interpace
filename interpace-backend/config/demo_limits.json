@@ -1,0 +1,65 @@
+{
+  "_说明": "演示环境配额配置。改完保存即生效（最多 5 秒内热加载，不用重启服务）。JSON 不能写注释，所以每段用下划线开头的键当注释，程序会忽略它们。改坏了不会让服务挂掉：会保留上一次能用的配置并打错误日志。",
+
+  "_enabled": "总开关。false 时整套限制与降本开关全部不生效。",
+  "enabled": true,
+
+  "_environments": "这套配额对哪些环境生效。默认只有 demo——开发时绝不会被自己的配额卡住，正式环境也不受它影响。",
+  "environments": ["demo"],
+
+  "per_ip": {
+    "_说明": "按客户端 IP 的限制。token 是「累计总量」，永不重置；其余都是「每日」计数，第二天零点自动清零。",
+    "_token_quota": "每个 IP 累计可消耗的 token 总量（把输入、输出、推理 token 全算进去）。这是硬天花板，用完了这个 IP 就再也用不了。",
+    "token_quota": 3000000,
+    "_turns_per_day": "每个 IP 每天最多几轮对话（一次提问到回答完算一轮）。",
+    "turns_per_day": 10,
+    "_quizzes_per_day": "每个 IP 每天最多提交几次答卷（评分要调模型）。",
+    "quizzes_per_day": 2,
+    "_evaluations_per_day": "每个 IP 每天最多生成几次面试复盘。",
+    "evaluations_per_day": 1,
+    "_voice_minutes_per_day": "每个 IP 每天最多几分钟语音面试（ASR 按时长、TTS 按字符，都不便宜）。",
+    "voice_minutes_per_day": 3
+  },
+
+  "per_user": {
+    "_说明": "按账号的限制，防止单个账号把库撑爆。",
+    "max_sessions": 3,
+    "max_notes": 10,
+    "_max_turns_per_session": "单个会话最多几轮。这条比「每日轮数」更省钱——上下文越长，每次提问的输入 token 越贵。",
+    "max_turns_per_session": 5
+  },
+
+  "interview": {
+    "_说明": "模拟面试的时长限制。从面试记录创建算起，语音与文字两种形式都受限。",
+    "_max_minutes": "单场模拟面试最长时长（分钟）。到点后：语音面试由服务端自动结束并关闭连接；文字面试不再回答新问题（直接给出提示，不再调用模型）。0 表示不限。",
+    "max_minutes": 3
+  },
+
+  "global": {
+    "_说明": "全局兜底。按 IP 限流挡不住「很多人各用一点」的长尾，这一层才是真正护住钱包的。",
+    "_daily_token_budget": "所有 IP 加起来每天最多消耗多少 token，超过后所有人一律被拒。",
+    "daily_token_budget": 500000,
+    "_daily_call_budget": "所有 IP 加起来每天最多多少次模型调用。",
+    "daily_call_budget": 150
+  },
+
+  "cost_reduction": {
+    "_说明": "演示环境的降本开关。这些调用用户看不见，但对尝鲜体验没贡献，关掉能显著省钱。",
+    "_disable_background_extraction": "关掉后台的画像抽取、记忆抽取与合并、会话摘要压缩（它们每次都会额外调模型）。",
+    "disable_background_extraction": true,
+    "_disable_voice_interview": "彻底关掉语音面试：前端不显示「语音面试」按钮，后端也会拒绝语音连接（两边读同一份配置）。语音是双计费（ASR 按时长 + TTS 按字符），最贵；若它是卖点就关掉这个开关，改用上面的语音分钟数限制。",
+    "disable_voice_interview": true,
+    "_disable_file_upload": "关掉附件上传。PDF / 图片解析出的全文会整段进上下文，一次能顶几十轮对话。",
+    "disable_file_upload": false,
+    "_max_tokens": "演示环境单次回答的最大输出 token。调小能省钱，但回答会被截断。",
+    "max_tokens": 1024
+  },
+
+  "notice": {
+    "_说明": "界面上告诉用户当前是演示环境、以及为什么突然不能用了。",
+    "banner_text": "演示环境：有调用次数上限、数据每日重置",
+    "rejected_message": "演示环境的体验额度已用完。想继续使用请部署自己的实例。",
+    "_interview_timeout_message": "里面的 {minutes} 会被替换成实际分钟数。",
+    "interview_timeout_message": "本场模拟面试已达演示环境的 {minutes} 分钟上限，已自动结束。可以点「结束面试」查看复盘，或开一场新的面试。"
+  }
+}

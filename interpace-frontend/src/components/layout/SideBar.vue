@@ -7,10 +7,20 @@ type SessionItem = {
   title: string
 }
 
-defineProps<{
-  sessions: SessionItem[]
-  activeSessionId: number | string
-}>()
+// 文案做成可选 props：默认沿用「会话」的措辞（学习室 / 面试间），
+// 笔记本里装的是笔记而不是会话，传「新建笔记 / 历史笔记」覆盖。
+withDefaults(
+  defineProps<{
+    sessions: SessionItem[]
+    activeSessionId: number | string
+    createLabel?: string
+    sectionTitle?: string
+  }>(),
+  {
+    createLabel: '新建会话',
+    sectionTitle: '历史会话'
+  }
+)
 
 const emit = defineEmits<{
   createSession: []
@@ -25,9 +35,9 @@ const emit = defineEmits<{
     <!-- 侧栏只负责触发事件，具体业务由各页面视图处理。 -->
     <el-button class="create-btn" @click="emit('createSession')">
       <el-icon><Plus /></el-icon>
-      新建会话
+      {{ createLabel }}
     </el-button>
-    <p class="section-title">历史会话</p>
+    <p class="section-title">{{ sectionTitle }}</p>
     <HistoryList
       :sessions="sessions"
       :active-session-id="activeSessionId"

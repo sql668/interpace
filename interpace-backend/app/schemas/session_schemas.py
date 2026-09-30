@@ -84,4 +84,3 @@ class InterviewDetailResponse(BaseModel):
     created_at: int
     # 最后更新时间（Unix 秒）。
     updated_at: int
-

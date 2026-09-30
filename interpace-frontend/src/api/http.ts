@@ -1,9 +1,11 @@
 import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
+import { env } from '@/config/env'
 import router from '../router'
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from './token'
 
-const baseURL = import.meta.env.VITE_API_BASE_URL
+// 统一从 env 出口读取，缺失时会直接抛错，不再静默拿到 undefined
+const baseURL = env.apiBaseUrl
 
 // 业务接口实例：统一挂载鉴权头
 const api: AxiosInstance = axios.create({

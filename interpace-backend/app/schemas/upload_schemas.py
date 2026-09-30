@@ -5,6 +5,19 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class UploadParseInfo(BaseModel):
+    """上传文档时的解析结果摘要。
+
+    只有 PDF / Word / 纯文本会带这一段——上传完就能告诉用户「读到了没有」，
+    而不是等他发完消息才发现模型根本没看到简历。
+    """
+
+    ok: bool  # 是否读到了可用文本
+    char_count: int  # 读到的正文字数
+    suspected_scanned: bool  # 疑似扫描件（会改用逐页图片识别）
+    message: str  # 给用户看的说明
+
+
 class UploadResponse(BaseModel):
     """统一上传响应体。"""
 
@@ -26,3 +39,5 @@ class UploadResponse(BaseModel):
     expire_time: datetime | None = None
     # 是否命中去重（true 表示复用已有资源）。
     is_deduplicated: bool
+    # 文档解析结果；图片 / 音频等非文档类型为 null。
+    parse: UploadParseInfo | None = None

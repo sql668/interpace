@@ -7,7 +7,11 @@ import { computed, onBeforeUnmount, shallowRef } from 'vue'
 const props = defineProps<{
   title: string
   content: string
+  /** 保存状态提示文案（由页面根据自动保存状态映射而来），为空则不显示 */
+  statusText?: string
 }>()
+
+const TITLE_PLACEHOLDER = '请输入笔记标题'
 
 const emit = defineEmits<{
   updateTitle: [value: string]
@@ -51,7 +55,13 @@ const handleEditorChange = (editor: IDomEditor) => {
         :default-config="toolbarConfig"
         mode="default"
       />
-      <el-input v-model="noteTitle" class="title-input" placeholder="请输入笔记标题" />
+      <!-- 标题占满整行，与下方正文区对齐；保存状态放在输入框内部右端，
+           既归属于标题区域，又不会飘在空白处 -->
+      <el-input v-model="noteTitle" class="title-input" :placeholder="TITLE_PLACEHOLDER">
+        <template #suffix>
+          <span v-if="statusText" class="save-hint">{{ statusText }}</span>
+        </template>
+      </el-input>
       <Editor
         class="editor-content"
         :model-value="content"
@@ -88,7 +98,16 @@ const handleEditorChange = (editor: IDomEditor) => {
   border-radius: 10px 10px 0 0;
 }
 
+.save-hint {
+  flex-shrink: 0;
+  color: #9ea6b4;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .title-input {
+  width: 100%;
+
   :deep(.el-input__wrapper) {
     border-radius: 0;
     box-shadow: 0 0 0 1px #d8dbe2 inset;

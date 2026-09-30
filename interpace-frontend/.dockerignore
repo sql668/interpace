@@ -1,0 +1,22 @@
+# 前端构建上下文排除清单（T11.3）
+
+# 本地产物与依赖：镜像里由构建阶段自己产出
+node_modules/
+dist/
+
+# 环境变量：只保留 .env.production（构建时需要），其余本地文件不进上下文
+.env
+.env.local
+.env.*.local
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
+
+# 文档与 Docker 自身
+*.md
+Dockerfile
+.dockerignore

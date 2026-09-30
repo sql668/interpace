@@ -2,23 +2,85 @@
 import { computed } from 'vue'
 import { ChatDotRound, UserFilled } from '@element-plus/icons-vue'
 import MsgFile from './MsgFile.vue'
+import QuizCard from '@/components/quiz/QuizCard.vue'
+import ProfileProposalCard from '@/components/profile/ProfileProposalCard.vue'
+import ResumeDownloadButton from '@/components/resume/ResumeDownloadButton.vue'
 import TypingIndicator from './TypingIndicator.vue'
+import { DEFAULT_CHAT_MODE, RESUME_MODE, findChatMode } from '@/constants/chat-modes'
 import { renderMarkdownCached } from '@/utils/markdownUtil'
+import type { ProfileProposalItem } from '@/types/profile'
 import type { UiMessage } from '@/types/chat'
 
 const props = defineProps<{
     message: UiMessage
+    /** message_id -> paper_id 映射；命中时在这条消息下渲染答题卡片 */
+    quizPapers?: Record<number, number>
+    /** message_id -> 画像待确认记录；命中时渲染画像确认卡片（T6.2） */
+    profileProposals?: Record<number, ProfileProposalItem>
 }>()
 
 const emit = defineEmits<{
     openInterview: [interviewId: number]
+    saveToNote: [messageId: number]
+    explainTopics: [topics: string[]]
+    profileUpdated: [proposal: ProfileProposalItem]
 }>()
+
+// 题库卡片：靠「入口消息 ID → 卷子 ID」映射判定，
+// 历史回显与刚出题完（流式结束）两条路径用的是同一份映射。
+const quizPaperId = computed(() => {
+    const messageId = props.message.messageId
+    if (messageId === undefined || props.message.role !== 'assistant') return undefined
+    return props.quizPapers?.[messageId]
+})
+
+// 画像确认卡片：同一条消息可能同时是「简历优化结果」，判定方式与题库一致。
+const profileProposal = computed(() => {
+    const messageId = props.message.messageId
+    if (messageId === undefined || props.message.role !== 'assistant') return undefined
+    return props.profileProposals?.[messageId]
+})
+
+// 「下载 Word」：只对简历优化模式、已经落库、且答复里有内容的助手消息展示。
+const canExportResume = computed(
+    () =>
+        props.message.role === 'assistant' &&
+        !props.message.pending &&
+        props.message.messageId !== undefined &&
+        props.message.selectModel === RESUME_MODE &&
+        props.message.text.trim().length > 0
+)
 
 const markdownHtml = computed(() => {
     if (props.message.role !== 'assistant') return ''
     // cacheKey 用 message.id，避免旧消息重复解析
     return renderMarkdownCached(props.message.text, props.message.id)
 })
+
+// 模式标签：只在助手侧、且不是默认模式时展示，避免每条消息都顶着「快速回答」。
+const modeLabel = computed(() => {
+    if (props.message.role !== 'assistant') return ''
+    const value = props.message.selectModel
+    if (value === undefined || value === DEFAULT_CHAT_MODE) return ''
+    return findChatMode(value)?.label ?? ''
+})
+
+// 「存入笔记」：只对已经落库（拿得到 messageId）、并且已有内容的助手回答展示
+const canSaveToNote = computed(
+    () =>
+        props.message.role === 'assistant' &&
+        !props.message.pending &&
+        props.message.messageId !== undefined &&
+        props.message.text.trim().length > 0 &&
+        // 题库入口消息的正文是原始 JSON，由答题卡片自带的「存入笔记」负责
+        !quizPaperId.value
+)
+
+const handleSaveToNote = () => {
+    const messageId = props.message.messageId
+    if (messageId === undefined) return
+    emit('saveToNote', messageId)
+}
 </script>
 
 <template>
@@ -36,7 +98,8 @@ const markdownHtml = computed(() => {
                 <!-- AI 回复：等待首个片段时展示加载动画，收到内容后切换为 Markdown 渲染 -->
                 <template v-if="message.role === 'assistant'">
                     <TypingIndicator v-if="message.pending && !message.text" />
-                    <div v-else class="markdown-body" v-html="markdownHtml" />
+                    <!-- 出题消息的正文是约定的 JSON，交给答题卡片呈现，不直接铺原文 -->
+                    <div v-else-if="!quizPaperId" class="markdown-body" v-html="markdownHtml" />
                 </template>
                 <!-- 用户提问：纯文本显示 -->
                 <p v-else class="text">{{ message.text }}</p>
@@ -55,14 +118,39 @@ const markdownHtml = computed(() => {
                     @click="emit('openInterview', message.interviewId)">
                     查看面试记录详情
                 </button>
+                <!-- 刷题评测：出题完成后在原消息下渲染答题卡片 -->
+                <QuizCard
+                    v-if="quizPaperId"
+                    :paper-id="quizPaperId"
+                    @explain-topics="emit('explainTopics', $event)" />
+                <!-- 简历优化结果：导出为 Word（T6.4 / T6.5） -->
+                <ResumeDownloadButton
+                    v-if="canExportResume && message.messageId !== undefined"
+                    :message-id="message.messageId" />
+                <!-- 简历里抽出的画像信息：确认后才写入（T6.2） -->
+                <ProfileProposalCard
+                    v-if="profileProposal"
+                    :proposal="profileProposal"
+                    @updated="emit('profileUpdated', $event)" />
+                <!-- 一键存入笔记：学习室与面试间共用 -->
+                <button
+                    v-if="canSaveToNote"
+                    type="button"
+                    class="note-card"
+                    @click="handleSaveToNote">
+                    存入笔记
+                </button>
             </div>
-            <!-- 时间戳 -->
-            <p class="time">
-                {{
-                    new Date(message.createdAt * 1000).toLocaleTimeString('zh-CN', {
-                        hour12: false,
-                    })
-                }}
+            <!-- 模式标签 + 时间戳 -->
+            <p class="meta">
+                <span v-if="modeLabel" class="mode-tag">{{ modeLabel }}</span>
+                <span class="time">
+                    {{
+                        new Date(message.createdAt * 1000).toLocaleTimeString('zh-CN', {
+                            hour12: false,
+                        })
+                    }}
+                </span>
             </p>
         </div>
     </div>
@@ -126,8 +214,24 @@ const markdownHtml = computed(() => {
     background: #d8dde8;
 }
 
-.time {
+.meta {
     margin: 7px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mode-tag {
+    border: 1px solid #e6d9ae;
+    border-radius: 999px;
+    background: #fffaf0;
+    color: #8a6d00;
+    font-size: 12px;
+    line-height: 1;
+    padding: 3px 9px;
+}
+
+.time {
     color: #9ea6b4;
     font-size: 13px;
 }
@@ -138,6 +242,17 @@ const markdownHtml = computed(() => {
     border-radius: 8px;
     background: #f7f9fc;
     color: #2f4660;
+    padding: 8px 12px;
+    cursor: pointer;
+}
+
+.note-card {
+    margin-top: 10px;
+    margin-left: 8px;
+    border: 1px solid #e6d9ae;
+    border-radius: 8px;
+    background: #fffaf0;
+    color: #8a6d00;
     padding: 8px 12px;
     cursor: pointer;
 }

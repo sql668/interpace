@@ -149,8 +149,16 @@ activemq-data/
 
 # Environments
 .env
-.env.development
-.env.production
+# 所有按环境拆分的密钥文件一律忽略（原来是逐个列出来的，只写了
+# development / production 两个——新加的 .env.demo / .env.test / .env.docker
+# 全都不在名单里，部署时创建它们会被 `git add .` 直接提交上去）。
+# 下面两行只放行示例模板，模板里不允许出现真实密钥。
+.env.*
+!.env.example
+
+# 数据库备份产物（deploy/backup.sh 的输出）。里面有全量业务数据，绝不能进仓库。
+backups/
+
 .envrc
 .venv
 env/
@@ -245,6 +253,4 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-
 

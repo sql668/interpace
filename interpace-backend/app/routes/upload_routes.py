@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core import raise_error
 from app.db import User, get_db
-from app.schemas import UploadResponse
+from app.schemas import UploadParseInfo, UploadResponse
 from app.services.upload_service_minio import UploadService
+from app.services.usage_quota_service import UsageQuotaService
 
 # 上传路由组，不单独设置前缀，由 main.py 统一挂载。
 router = APIRouter()
@@ -33,8 +35,17 @@ def upload_file(
     """
     支持文件/图片/音频上传，自动完成类型识别、去重与资源记录管理。
     """
+    # 演示环境可以在配置里整体关掉附件上传（T12.5）。前端不显示入口只是界面，
+    # 这里判一次才算数：附件（尤其 PDF）解析出的全文会整段进上下文，
+    # 一次上传能顶几十轮对话的 token。
+    if UsageQuotaService.file_upload_disabled():
+        raise_error(
+            code=status.HTTP_403_FORBIDDEN,
+            message="当前环境未开放附件上传",
+        )
+
     # 业务逻辑全部在 service 层，路由仅做参数接入与响应组装。
-    resource, is_deduplicated = UploadService.save_file(
+    resource, is_deduplicated, parse_result = UploadService.save_file(
         db=db,
         user=current_user,
         file=file,
@@ -51,4 +62,14 @@ def upload_file(
         upload_purpose=resource.upload_purpose,
         expire_time=resource.expire_time,
         is_deduplicated=is_deduplicated,
+        parse=(
+            UploadParseInfo(
+                ok=parse_result.ok,
+                char_count=parse_result.char_count,
+                suspected_scanned=parse_result.suspected_scanned,
+                message=parse_result.message,
+            )
+            if parse_result
+            else None
+        ),
     )

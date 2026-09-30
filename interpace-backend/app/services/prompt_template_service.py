@@ -4,8 +4,10 @@ import json
 from typing import Optional
 
 import redis
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.logging_config import main_logger
 from app.core.settings import settings
 from app.db.models import PromptTemplate
 from app.utils.prompt_logger import log_redis_status
@@ -13,12 +15,17 @@ from app.utils.prompt_logger import log_redis_status
 
 AGENT_CONFIG = {
     "flow_controller": {"scene": "workflow", "name": "流程总控Agent"},
+    "general_assistant": {"scene": "chat", "name": "通用问答Agent"},
     "resume_parser": {"scene": "resume", "name": "资料&简历解析Agent"},
+    "resume_extractor": {"scene": "resume", "name": "简历画像抽取Agent（内部）"},
     "quiz_generate_workflow": {"scene": "quiz", "name": "出题题库Agent"},
+    "quiz_evaluator": {"scene": "quiz", "name": "题库评分Agent"},
     "interview_host": {"scene": "interview", "name": "面试主考官Agent"},
     "interview_evaluator": {"scene": "evaluation", "name": "面试评测Agent"},
     "difficulty_learner": {"scene": "study", "name": "难点学习Agent"},
     "note_archiver": {"scene": "note", "name": "笔记归档Agent"},
+    "memory_extractor": {"scene": "memory", "name": "记忆抽取Agent（内部）"},
+    "memory_consolidator": {"scene": "memory", "name": "记忆整合Agent（内部）"},
 }
 
 
@@ -58,7 +65,7 @@ class PromptTemplateManager:
         max_version = (
             db.query(PromptTemplate)
             .filter(*filter_conditions)
-            .with_entities(db.func.max(PromptTemplate.version))
+            .with_entities(func.max(PromptTemplate.version))
             .scalar()
         )
         return (max_version or 0) + 1
@@ -183,7 +190,10 @@ class PromptTemplateManager:
             return False
 
         agent_display = target.agent_name if target.agent_name else "公共"
-        print(f"\n[回滚前] {agent_display}:{target.scene} v{target.version} -> is_active: {target.is_active}")
+        main_logger.info(
+            f"[提示词回滚] 回滚前 {agent_display}:{target.scene} "
+            f"v{target.version} -> is_active={target.is_active}"
+        )
 
         filter_conditions = [PromptTemplate.scene == target.scene]
         if target.agent_name:
@@ -205,8 +215,11 @@ class PromptTemplateManager:
             PromptTemplate.id == template_id
         ).first()
         
-        print(f"[回滚后] {agent_display}:{target.scene} v{target_refreshed.version} -> is_active: {target_refreshed.is_active}")
-        print(f"[✓] 版本回滚成功!\n")
+        main_logger.info(
+            f"[提示词回滚] 回滚后 {agent_display}:{target.scene} "
+            f"v{target_refreshed.version} -> is_active={target_refreshed.is_active}"
+        )
+        main_logger.info(f"[提示词回滚] 版本回滚成功: {agent_display}:{target.scene}")
 
         if self.use_redis and self.redis_client:
             self.load_all_effective_to_redis(db)

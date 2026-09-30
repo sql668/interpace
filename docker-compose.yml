@@ -1,0 +1,176 @@
+# 面途 InterPace 编排（T11.4）
+#
+# 目标机器是腾讯轻量云 2 核 2G，所以编排里处处优先"少占内存"：
+# MySQL 的缓冲池、Redis 的 maxmemory 都被压小，后端固定单 worker。
+#
+# 端口暴露原则（很重要）：
+#   **只有 frontend(Nginx) 发布端口，其余服务只在容器网络内可达。**
+#   后端一旦被公网直连，配额与限流依赖的"客户端 IP 从哪来"就不成立了
+#   （详见 docs/TODO.md 里 T12.4 关于 IP 不可伪造的说明）。
+#
+# 用法：
+#   1. cp .env.example .env 并填好密钥（compose 只自动读这个文件名）
+#   2. docker compose up -d
+#   3. docker compose ps   # 全部 healthy 即正常
+
+name: interpace
+
+# 日志上限：不设的话 json-file 驱动会把磁盘吃满（2核2G 的机器尤其经不起）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------- MySQL ----------------
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    # 排序规则必须与开发库一致（utf8mb4_0900_ai_ci）：
+    # 迁移基线是按这个排序规则生成的，不一致会导致列上的 collation 全部对不上。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # 2核2G 的机器上默认 128M 偏大后又要给其它容器腾地方，这里显式压到 256M 以内。
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL:-256M}
+      - --max-connections=50
+      # 关掉 performance_schema：省下的是实打实的常驻内存，本地部署用不到它。
+      - --performance-schema=OFF
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env.docker 里设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-inter-pace}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    logging: *default-logging
+    networks: [interpace]
+
+  # ---------------- Redis（提示词模板缓存） ----------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 这里只做模板缓存，丢了能从 MySQL 重建，所以关掉持久化、设好淘汰上限。
+    #
+    # 写法注意：`save` 指令要**两个**参数，所以必须写成独立的 "--save" + 空串。
+    # 一开始写成 `--save=` 会被 redis 当成 `save <空>`，然后把后面的
+    # `--appendonly=no` 吃掉当第二个参数，直接报 "Bad directive"（实测踩过）。
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-96mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+    networks: [interpace]
+
+  # ---------------- MinIO（对象存储，D25 的结论：先留着） ----------------
+  minio:
+    # 镜像源做成可配置的，因为 MinIO 的官方镜像源这两年一直在变：
+    #   - Docker Hub 的 `minio/minio`：有的网络还能拉，有的会报 "repository does not exist"
+    #   - `quay.io/minio/minio`：官方现在主推，但**匿名拉取会被拒**，需要先 `docker login quay.io`
+    # 服务器上哪个能拉就用哪个，在 `.env` 里设 MINIO_IMAGE 覆盖即可（不用改这个文件）。
+    # 最稳的其实是**复用服务器上已有的那张**（先 docker image ls | grep minio 看一眼）。
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?请在 .env.docker 里设置 MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?请在 .env.docker 里设置 MINIO_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+    networks: [interpace]
+
+  # ---------------- 后端（FastAPI） ----------------
+  backend:
+    build:
+      context: ./interpace-backend
+    image: interpace-backend:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      # 容器里的连接串指向服务名，不是 127.0.0.1——
+      # 注意：密码里若含 @ : / 等字符必须做 URL 编码（本机开发库的密码就带 @，写成 %40）。
+      APP_ENV: ${APP_ENV:-production}
+      MYSQL_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-inter-pace}?charset=utf8mb4
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MINIO_ENDPOINT: minio:9000
+      MINIO_SECURE: "false"
+      # 后端读的是 MINIO_ACCESS_KEY / MINIO_SECRET_KEY，而 MinIO 服务用的是
+      # MINIO_ROOT_USER / MINIO_ROOT_PASSWORD——**必须在这里映射过去**。
+      # 漏了这一步后端会退回默认的 minioadmin/minioadmin，上传时报
+      # "MinIO 上传失败"（500），而 .env 里看起来一切正常，很难查。
+      # 这是本项目的冒烟脚本抓到的第一个真实部署缺陷。
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      # 前端 Nginx 会覆盖写入 X-Real-IP，所以这里可以信任转发头。
+      # 保持 false 的话，所有访客会被算成同一个 IP，配额就废了。
+      TRUST_PROXY_HEADERS: "true"
+      TZ: Asia/Shanghai
+    volumes:
+      # 日志挂出来：容器重建不丢日志，也不会把镜像层写胖。
+      - backend-logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    logging: *default-logging
+    networks: [interpace]
+    # 刻意不写 ports：后端只能被 Nginx 访问（见文件顶部说明）
+
+  # ---------------- 前端（Nginx 托管静态文件 + 反代 /api） ----------------
+  frontend:
+    build:
+      context: ./interpace-frontend
+      args:
+        # 与 Nginx 反代路径一致；改这里要同时改 deploy/nginx.conf
+        VITE_API_BASE_URL: /api/v1
+    image: interpace-frontend:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    ports:
+      # 默认 80；本地验证时可以用 WEB_PORT=8080 避开系统占用。
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      # 等后端**健康**再启动 nginx，而不是"容器起来了就行"：
+      # 否则后端还在跑迁移/初始化时，nginx 已经在接请求，用户会看到一片 502。
+      backend:
+        condition: service_healthy
+    logging: *default-logging
+    networks: [interpace]
+
+volumes:
+  mysql-data:
+  minio-data:
+  backend-logs:
+
+networks:
+  interpace:
+    driver: bridge

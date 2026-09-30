@@ -1,21 +1,42 @@
 ﻿<script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
     createSession,
     deleteSession,
+    finishInterview,
     getInterviewDetail,
     getSessionMessages,
     getSessions,
     updateSessionTitle,
 } from '@/api/chat'
 import ChatWindow from '@/components/chat/ChatWindow.vue'
+import VoiceInterviewPanel from '@/components/speech/VoiceInterviewPanel.vue'
+import EvaluationPanel from '@/components/evaluation/EvaluationPanel.vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import SideBar from '@/components/layout/SideBar.vue'
 import { useSessionStreamSender } from '@/composables/useSessionStreamSender'
-import { tabs } from '@/composables/useRoomShell'
-import type { InterviewDetail, SessionItem, SessionRecord, UiMessage } from '@/types/chat'
+import { useRuntimeConfig } from '@/composables/useRuntimeConfig'
+import { tabs } from '@/constants/nav-tabs'
+import { importNoteFromMessage } from '@/api/note'
+import { getProfileProposalsBySession } from '@/api/profile'
+import {
+    DEFAULT_CHAT_MODE,
+    EVALUATION_MODE,
+    INTERVIEW_MODES,
+    INTERVIEW_MODE,
+    KNOWLEDGE_MODE,
+} from '@/constants/chat-modes'
+import { useVoiceInterview } from '@/composables/useVoiceInterview'
+import type { ProfileProposalItem } from '@/types/profile'
+import type {
+    InterviewDetail,
+    MessageSegment,
+    SessionItem,
+    SessionRecord,
+    UiMessage,
+} from '@/types/chat'
 
 const SESSION_MODEL: 1 = 1
 
@@ -27,6 +48,8 @@ const activeTab = ref('interview-room')
 const sessions = ref<SessionItem[]>([])
 const activeSessionId = ref<number | null>(null)
 const loadingSessions = ref(false)
+// 当前选中的模式（select_model），每次发送时一并提交给后端。
+const selectedMode = ref<number>(DEFAULT_CHAT_MODE)
 
 // 会话分页状态（左侧侧边栏）。
 const sessionPage = ref(1)
@@ -42,6 +65,119 @@ const messageLoadingMore = ref(false)
 
 // 当前会话的消息列表（不做多会话缓存，保持实现更简洁）。
 const uiMessages = ref<UiMessage[]>([])
+
+// message_id -> 画像待确认记录：命中时在该消息下渲染画像确认卡片（T6.2）。
+// 与题库卡片一样，历史回显和刚抽完两条路径共用这一份映射。
+const profileProposals = ref<Record<number, ProfileProposalItem>>({})
+
+// 语音面试（T7.7）：只在「模拟面试」模式下显示面板，切走模式时自动断开连接。
+// 这里解构出来用：模板对嵌套在普通对象里的 ref 不会自动解包，
+// 拉平成顶层绑定后模板里就能直接当值用（`playback` 本身是 reactive，保持原样）。
+const {
+    status: voiceStatus,
+    connected: voiceConnected,
+    asrPartial: voiceAsrPartial,
+    asrFinal: voiceAsrFinal,
+    replyText: voiceReplyText,
+    timeoutMessage: voiceTimeoutMessage,
+    micLevels: voiceMicLevels,
+    playback: voicePlayback,
+    connect: voiceConnect,
+    startRecording: voiceStartRecording,
+    stopRecording: voiceStopRecording,
+    sendText: voiceSendText,
+    disconnect: voiceDisconnect,
+} = useVoiceInterview()
+const voiceEnabled = ref(false)
+const showVoicePanel = computed(() => selectedMode.value === INTERVIEW_MODE && voiceEnabled.value)
+
+// 语音面试的可用性由后端配置决定（T12.4）：演示环境会在配置里整体关掉它。
+// 拉取失败按"可用"处理，真正的拦截在后端 WebSocket 路由上。
+const { runtimeConfig: runtimeConfigState, ensureRuntimeConfig } = useRuntimeConfig()
+const voiceInterviewAvailable = computed(
+    () => runtimeConfigState.value?.features.voice_interview ?? true
+)
+const showVoiceToggle = computed(
+    () => selectedMode.value === INTERVIEW_MODE && voiceInterviewAvailable.value
+)
+
+// 演示环境的单场面试时长到点（T12.4）：服务端已把这场面试结束掉，
+// 这里只负责告知用户，并刷新一次消息列表——入口消息卡片上的 interviewId 会让
+// 「结束面试 / 查看复盘」的入口亮起来，用户可以接着看复盘。
+watch(voiceTimeoutMessage, async (message) => {
+    if (!message) return
+    ElMessage.warning(message)
+    await loadMessages(true)
+})
+
+// 面试复盘（T8.5）：切到「面试复盘」模式时，把这场会话里最近的面试记录交给面板。
+// 一场面试的入口消息带 interviewId，直接取最后一条即可。
+const latestInterviewId = computed<number | null>(() => {
+    for (let index = uiMessages.value.length - 1; index >= 0; index -= 1) {
+        const id = uiMessages.value[index].interviewId
+        if (typeof id === 'number') {
+            return id
+        }
+    }
+    return null
+})
+const showEvaluationPanel = computed(() => selectedMode.value === EVALUATION_MODE)
+
+// 「结束面试」（T7.8）：结束 → 自动切到面试复盘 → 立刻生成一份复盘
+const finishing = ref(false)
+const evaluationPanelRef = ref<InstanceType<typeof EvaluationPanel> | null>(null)
+const showFinishButton = computed(
+    () => selectedMode.value === INTERVIEW_MODE && latestInterviewId.value !== null,
+)
+
+const handleFinishInterview = async () => {
+    const interviewId = latestInterviewId.value
+    if (!interviewId || finishing.value) return
+    finishing.value = true
+    try {
+        const result = await finishInterview(interviewId)
+        ElMessage.success(
+            result.already_finished
+                ? '这场面试之前已经结束了，直接看复盘'
+                : `面试已结束（${result.interview_duration} 秒 / ${result.qa_count} 轮问答），正在生成复盘…`,
+        )
+        // 切到复盘模式：面板挂载后会自己去读一次，这里再主动触发一次生成
+        selectedMode.value = EVALUATION_MODE
+        await nextTick()
+        await evaluationPanelRef.value?.generate()
+    } finally {
+        finishing.value = false
+    }
+}
+
+// 复盘结果里的「针对薄弱点讲一讲」：切到知识精讲继续问，复用已有的流式链路
+const handleExplainTopics = async (topics: string[]) => {
+    if (!topics.length) return
+    selectedMode.value = KNOWLEDGE_MODE
+    await handleSend(`请讲讲这几个薄弱知识点：${topics.join('、')}`, [])
+}
+
+const toggleVoiceInterview = async () => {
+    if (voiceEnabled.value) {
+        voiceDisconnect()
+        voiceEnabled.value = false
+        return
+    }
+    if (!activeSessionId.value) {
+        ElMessage.warning('请先创建或选择一个会话')
+        return
+    }
+    voiceEnabled.value = true
+    await voiceConnect(activeSessionId.value, SESSION_MODEL)
+}
+
+// 切走「模拟面试」模式时收掉语音通道：避免麦克风与连接在后台一直开着。
+watch(selectedMode, (mode) => {
+    if (mode !== INTERVIEW_MODE && voiceEnabled.value) {
+        voiceDisconnect()
+        voiceEnabled.value = false
+    }
+})
 
 // 面试详情弹窗状态。
 const interviewDialogVisible = ref(false)
@@ -77,6 +213,7 @@ const mapRecordsToUiMessages = (records: SessionRecord[]): UiMessage[] => {
     return sorted.flatMap((item) => {
         const userMessage: UiMessage = {
             id: `${item.id}-req`,
+            messageId: item.id,
             role: 'user',
             text: item.request_text || '',
             createdAt: item.created_at,
@@ -84,12 +221,14 @@ const mapRecordsToUiMessages = (records: SessionRecord[]): UiMessage[] => {
         }
         const assistantMessage: UiMessage = {
             id: `${item.id}-resp`,
+            messageId: item.id,
             role: 'assistant',
             text: item.response_text || '',
             createdAt: item.created_at,
             segments: item.response_segments || [],
             status: item.status,
             interviewId: item.interview_id,
+            selectModel: item.select_model,
         }
         return [userMessage, assistantMessage]
     })
@@ -137,6 +276,7 @@ const handleSessionClick = async (id: number | string) => {
 
 // 拉取消息列表；支持首屏重置与上拉分页。
 const loadMessages = async (reset = false) => {
+
     if (!activeSessionId.value) return
     if (messageLoading.value || messageLoadingMore.value) return
 
@@ -165,6 +305,39 @@ const loadMessages = async (reset = false) => {
     } finally {
         messageLoading.value = false
         messageLoadingMore.value = false
+    }
+}
+
+// 拉取当前会话的画像待确认记录：只更新 profileProposals，不碰消息列表，
+// 所以刷新它不会引起消息区跳动。
+const loadProfileProposals = async () => {
+    const sessionId = activeSessionId.value
+    if (!sessionId) {
+        profileProposals.value = {}
+        return
+    }
+    try {
+        const data = await getProfileProposalsBySession(sessionId)
+        // 请求期间可能已经切了会话，回来时确认仍是同一个再写入。
+        if (activeSessionId.value !== sessionId) return
+        const map: Record<number, ProfileProposalItem> = {}
+        for (const item of data.items) map[item.message_id] = item
+        profileProposals.value = map
+    } catch {
+        // 画像拉取失败不影响聊天主链路，静默处理
+    }
+}
+
+// 会话切换（含首屏选中）时同步刷新画像映射。
+watch(activeSessionId, () => {
+    void loadProfileProposals()
+})
+
+// 确认或忽略后：就地替换这一条，避免整页重拉。
+const handleProfileUpdated = (proposal: ProfileProposalItem) => {
+    profileProposals.value = {
+        ...profileProposals.value,
+        [proposal.message_id]: proposal
     }
 }
 
@@ -255,24 +428,20 @@ const openInterviewDetail = async (interviewId: number) => {
     }
 }
 
-// 附件入口占位：当前版本仅提示，后续可接上传流程。
-const handleAttach = () => {
-    ElMessage.info('当前版本暂未接入附件上传')
-}
-
 // 统一封装流式发送：负责占位消息、增量更新、结束后同步。
 const { sending, stopActiveStream, send } = useSessionStreamSender({
     sessionModel: SESSION_MODEL,
     getActiveSessionId: () => activeSessionId.value,
     // 创建本地占位消息：用户消息 + 助手空消息（后续不断 append delta）。
-    createPending: (text, sessionId) => {
+    createPending: (text, sessionId, segments) => {
         const baseId = `${sessionId}-${Date.now()}`
         const userMessage: UiMessage = {
             id: `${baseId}-user`,
             role: 'user',
             text,
             createdAt: nowTs(),
-            segments: [],
+            // 附件段直接来自已经上传成功的附件，气泡里会渲染出来
+            segments,
         }
         const assistantMessage = reactive<UiMessage>({
             id: `${baseId}-assistant`,
@@ -282,6 +451,8 @@ const { sending, stopActiveStream, send } = useSessionStreamSender({
             segments: [],
             // 首个片段到达前展示加载动画
             pending: true,
+            // 与请求时提交的模式保持一致，否则要刷新页面才看得到模式标签
+            selectModel: selectedMode.value,
         })
         // 只会追加到当前会话消息列表；后续 delta 只更新最后一条 assistant。
         uiMessages.value = [...uiMessages.value, userMessage, assistantMessage]
@@ -300,6 +471,17 @@ const { sending, stopActiveStream, send } = useSessionStreamSender({
             cancel: () => {
                 assistantMessage.pending = false
             },
+            // 收到 start 事件后补上真实消息 ID，「存入笔记」要用
+            setMessageId: (messageId: number) => {
+                assistantMessage.messageId = messageId
+            },
+            // 本轮开了面试：把入口标记补上，让「查看面试记录详情」卡片当场出现，
+            // 不用等刷新（后端此时已把消息 status 置为 1）。
+            setResult: ({ interviewId }) => {
+                if (interviewId === null) return
+                assistantMessage.interviewId = interviewId
+                assistantMessage.status = 1
+            },
         }
     },
     // 流结束后不做自动回刷，避免再次请求消息列表导致页面“刷新/跳动”。
@@ -307,12 +489,34 @@ const { sending, stopActiveStream, send } = useSessionStreamSender({
 })
 
 // 发送入口：复用通用流式发送 composable。
-const handleSend = async (text: string) => {
-    await send(text)
+const handleSend = async (text: string, segments: MessageSegment[]) => {
+    await send(text, selectedMode.value, segments)
+    // 简历优化这一轮可能抽出画像：流结束后刷一次映射，让确认卡片马上出现。
+    await loadProfileProposals()
+}
+
+// 「存入笔记」：同一时刻只处理一条，避免连点并发创建两条笔记
+const importingNoteMessageId = ref<number | null>(null)
+
+const handleSaveToNote = async (messageId: number) => {
+    if (importingNoteMessageId.value !== null) return
+    importingNoteMessageId.value = messageId
+    try {
+        const result = await importNoteFromMessage({ message_id: messageId })
+        if (result.created) {
+            ElMessage.success('已存入笔记')
+        } else {
+            ElMessage.info('这条消息之前已存入笔记')
+        }
+    } finally {
+        importingNoteMessageId.value = null
+    }
 }
 
 // 页面初始化：先拉第一页，再尽量补齐会话列表（最多 500 条）。
 onMounted(async () => {
+    // 运行时能力开关：决定「语音面试」按钮显不显示，尽早拉一次（演示环境会关掉它）。
+    void ensureRuntimeConfig()
     await loadSessions(true)
     while (sessionHasMore.value && sessions.value.length < 500) {
         await loadSessions(false)
@@ -336,15 +540,49 @@ onBeforeUnmount(() => {
                 @session-click="handleSessionClick"
                 @edit-session="editSessionTitle"
                 @remove-session="removeSession" />
-            <ChatWindow
-                :messages="uiMessages"
-                :has-more="messageHasMore"
-                :loading-more="messageLoadingMore || messageLoading"
-                :disabled="sending || !activeSessionId"
-                @load-more="loadMessages(false)"
-                @open-interview="openInterviewDetail"
-                @send="handleSend"
-                @attach="handleAttach" />
+            <div class="interview-room__main">
+                <!-- 面试复盘（T8.5）：只在「面试复盘」模式下显示 -->
+                <EvaluationPanel
+                    v-if="showEvaluationPanel"
+                    ref="evaluationPanelRef"
+                    :interview-id="latestInterviewId"
+                    @explain-topics="handleExplainTopics" />
+                <VoiceInterviewPanel
+                    v-if="showVoicePanel"
+                    :status="voiceStatus"
+                    :connected="voiceConnected"
+                    :asr-partial="voiceAsrPartial"
+                    :asr-final="voiceAsrFinal"
+                    :reply-text="voiceReplyText"
+                    :mic-levels="voiceMicLevels"
+                    :playback="voicePlayback"
+                    @start="voiceStartRecording"
+                    @stop="voiceStopRecording"
+                    @send-text="voiceSendText" />
+                <ChatWindow
+                    :messages="uiMessages"
+                    v-model:mode="selectedMode"
+                    :modes="INTERVIEW_MODES"
+                    :has-more="messageHasMore"
+                    :profile-proposals="profileProposals"
+                    :show-voice-toggle="showVoiceToggle"
+                    :voice-enabled="voiceEnabled"
+                    :show-finish-button="showFinishButton"
+                    :finishing="finishing"
+                    :loading-more="messageLoadingMore || messageLoading"
+                    :disabled="sending || !activeSessionId"
+                    :no-session="!loadingSessions && !activeSessionId"
+                    :sending="sending"
+                    @create-session="createNewSession"
+                    @load-more="loadMessages(false)"
+                    @open-interview="openInterviewDetail"
+                    @send="handleSend"
+                    @save-to-note="handleSaveToNote"
+                    @profile-updated="handleProfileUpdated"
+                    @toggle-voice="toggleVoiceInterview"
+                    @finish-interview="handleFinishInterview"
+                    @stop="stopActiveStream" />
+            </div>
         </div>
     </div>
 
@@ -373,12 +611,26 @@ onBeforeUnmount(() => {
     height: 100vh;
     display: flex;
     flex-direction: column;
+    /* 房间自身不滚动：内容超出时裁掉，而不是把整页顶出滚动条 */
+    overflow: hidden;
 }
 
 .interview-room__content {
     flex: 1;
     min-height: 0;
     display: flex;
+    overflow: hidden;
+}
+
+.interview-room__main {
+    flex: 1;
+    min-width: 0;
+    /* min-height + overflow 缺一不可：前者让这一列能被压缩，
+       后者保证内容溢不出去。缺了就会「整页变长、输入框跟着页面滚」。 */
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 .qa-list {

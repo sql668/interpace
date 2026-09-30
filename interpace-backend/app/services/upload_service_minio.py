@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from io import BytesIO
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core import raise_error
 from app.core.settings import settings
 from app.db.models import Resource, User
+from app.services.document_parse_service import DocumentParseResult, DocumentParseService
 from app.services.minio_storage_service import MinioStorageService
 
 # 图片后缀与 MIME 白名单。
@@ -84,12 +86,19 @@ class UploadService:
         file: UploadFile,
         storage_scene: int = STORAGE_SCENE_LONG,
         upload_purpose: int = UPLOAD_PURPOSE_GENERAL,
-    ) -> tuple[Resource, bool]:
-        """统一上传入口，返回 (resource, is_deduplicated)。"""
+    ) -> tuple[Resource, bool, DocumentParseResult | None]:
+        """统一上传入口，返回 (resource, is_deduplicated, parse_result)。
+
+        `parse_result` 只有 PDF / Word / 纯文本才有；其它类型为 None。
+        """
         # 1) 统一参数与文件校验，先拦截非法请求。
         file_ext, file_size = UploadService._validate_file(file=file)
         UploadService._validate_storage_scene(storage_scene=storage_scene)
         UploadService._validate_upload_purpose(upload_purpose=upload_purpose)
+
+        # 1.5) 文档类文件顺手解析一次，让用户上传完立刻知道读到没读到。
+        #      放在这里是为了让下面几条 return 路径都能带上结果。
+        parse_result = UploadService._parse_document(file=file)
 
         # 2) 计算内容哈希，作为用户维度去重核心键。
         md5_hash = UploadService._calculate_md5(file.file)
@@ -120,7 +129,7 @@ class UploadService:
                 upload_purpose=upload_purpose,
                 expire_time=expire_time,
             )
-            return existing, True
+            return existing, True, parse_result
 
         # 5) 非“仅提取”场景才上传原文件到 MinIO。
         if storage_scene != STORAGE_SCENE_EXTRACT_ONLY:
@@ -151,11 +160,116 @@ class UploadService:
             existing = UploadService._get_existing_resource(
                 db=db, user_id=user.id, file_hash=md5_hash)
             if existing:
+                return existing, True, parse_result
+            raise_error(code=409, message="资源写入冲突，请重试")
+
+        db.refresh(resource)
+        return resource, False, parse_result
+
+    @staticmethod
+    def save_generated_file(
+        db: Session,
+        user: User,
+        *,
+        file_name: str,
+        data: bytes,
+        content_type: str,
+        storage_scene: int = STORAGE_SCENE_LONG,
+    ) -> tuple[Resource, bool]:
+        """把**内存里生成的文件**（如导出的 Word）落成资源，返回 (resource, 是否复用)。
+
+        与 `save_file` 的区别：没有 `UploadFile`，直接吃字节；也不做文档解析
+        （生成物不需要再解析一遍）。其余治理口径完全一致——同样按
+        `(user_id, file_hash)` 去重、同样走 `resources` 元数据与过期回收，
+        所以导出的文件将来会被 T3.5 那套过期清理一起收走。
+        """
+        UploadService._validate_storage_scene(storage_scene)
+        file_ext = Path(file_name).suffix.lower()
+        md5_hash = hashlib.md5(data).hexdigest()
+        resource_type = RESOURCE_TYPE_FILE
+        object_key = UploadService._build_object_key(
+            user_id=user.id,
+            md5_hash=md5_hash,
+            file_ext=file_ext,
+            resource_type=resource_type,
+            storage_scene=storage_scene,
+        )
+        storage_path = UploadService._build_storage_path(
+            object_key=object_key, storage_scene=storage_scene
+        )
+        expire_time = UploadService._build_expire_time(storage_scene=storage_scene)
+
+        # 同样内容已经存过就直接复用，只刷新过期时间，不重复占存储。
+        existing = UploadService._get_existing_resource(
+            db=db, user_id=user.id, file_hash=md5_hash
+        )
+        if existing:
+            UploadService._refresh_existing_resource(
+                db=db,
+                resource=existing,
+                user=user,
+                storage_scene=storage_scene,
+                upload_purpose=UPLOAD_PURPOSE_GENERAL,
+                expire_time=expire_time,
+            )
+            return existing, True
+
+        client = MinioStorageService.get_client()
+        try:
+            MinioStorageService.put_object(
+                client=client,
+                bucket_name=settings.minio_bucket,
+                object_name=object_key,
+                data=BytesIO(data),
+                length=len(data),
+                content_type=content_type,
+                auto_create_bucket=True,
+            )
+        except S3Error:
+            raise_error(code=500, message="MinIO 上传失败")
+        except Exception:
+            raise_error(code=500, message="对象存储服务不可用")
+
+        resource = Resource(
+            resource_type=resource_type,
+            storage_scene=storage_scene,
+            upload_purpose=UPLOAD_PURPOSE_GENERAL,
+            file_name=file_name,
+            file_hash=md5_hash,
+            storage_path=storage_path,
+            user_id=user.id,
+            expire_time=expire_time,
+        )
+        db.add(resource)
+        try:
+            db.commit()
+        except IntegrityError:
+            # 并发写入时由唯一索引兜底，回查后返回已存在资源。
+            db.rollback()
+            existing = UploadService._get_existing_resource(
+                db=db, user_id=user.id, file_hash=md5_hash
+            )
+            if existing:
                 return existing, True
             raise_error(code=409, message="资源写入冲突，请重试")
 
         db.refresh(resource)
         return resource, False
+
+    @staticmethod
+    def _parse_document(file: UploadFile) -> DocumentParseResult | None:
+        """对支持解析的文档做一次解析；其它类型返回 None。
+
+        解析本身不会抛异常（`DocumentParseService.parse` 内部已兜底），
+        所以这里也不会因为解析问题影响上传。
+        """
+        filename = file.filename or ""
+        if not DocumentParseService.is_supported_document(filename):
+            return None
+        file.file.seek(0)
+        data = file.file.read()
+        file.file.seek(0)
+        return DocumentParseService.parse(data, filename)
 
     @staticmethod
     def _validate_file(file: UploadFile) -> tuple[str, int]:

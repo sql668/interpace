@@ -1,10 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>interpace-frontend</title>
+    <!-- 静态标题：运行时 main.ts 还会用 VITE_APP_TITLE 覆盖它，
+         但首屏渲染前、以及分享/搜索引擎抓取时看到的是这里，所以不能留着脚手架默认值。 -->
+    <title>面途 InterPace · AI 模拟面试与自动复盘</title>
+    <meta name="description" content="面途是一个陪你练面试的 AI：像面试官一样追问，像教练一样复盘，并记住你的薄弱点。" />
   </head>
   <body>
     <div id="app"></div>

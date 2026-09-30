@@ -4,6 +4,7 @@ import time
 from fastapi import Request
 
 from app.core import raise_error
+from app.core.client_ip import resolve_client_ip
 
 # 全局锁：保证并发请求下计数更新的原子性
 _LOCK = threading.Lock()
@@ -21,11 +22,13 @@ def rate_limit_dep(limit: int, window_seconds: int, key_prefix: str):
     """
 
     async def dependency(request: Request) -> None:
-        # 生产常见：优先取代理头部，其次回退到直连 IP
-        forwarded_for = request.headers.get("x-forwarded-for", "")
-        client_host = forwarded_for.split(",")[0].strip() or (
-            request.client.host if request.client else "unknown"
-        )
+        # T12.4：改用统一的真实 IP 解析。
+        #
+        # 原来是直接取 `X-Forwarded-For` 的**第一个**值，而 Nginx 用的是
+        # `$proxy_add_x_forwarded_for`——它保留客户端传来的值、把真实 IP 追加在末尾，
+        # 所以第一个值可以被客户端随便伪造（每个请求换个假 IP，限流就完全失效）。
+        # 现在优先用 Nginx 覆盖写入的 `X-Real-IP`，并且只在 TRUST_PROXY_HEADERS=true 时才认这些头。
+        client_host = resolve_client_ip(request)
         key = f"{key_prefix}:{client_host}"
         now = int(time.time())
         # 计算当前时间所在的时间窗口起点（固定窗口）
@@ -47,3 +50,14 @@ def rate_limit_dep(limit: int, window_seconds: int, key_prefix: str):
             _WINDOWS[key] = (last_start, count + 1)
 
     return dependency
+
+
+def reset_rate_limit_windows() -> None:
+    """清空所有限流窗口。
+
+    主要给测试用：限流是进程内的固定窗口，同一次 pytest 里跑多个用例时，
+    它们共用同一个「客户端 IP」键，注册次数很容易超过每分钟 5 次而互相拖累。
+    测试在用例开始前调用本函数即可让每个用例从零计数。
+    """
+    with _LOCK:
+        _WINDOWS.clear()

@@ -85,3 +85,19 @@ class MinioStorageService:
                 return True
             raise
 
+    @staticmethod
+    def get_object_bytes(client: Minio, storage_path: str) -> tuple[bytes, str]:
+        """按 `minio://bucket/object_key` 读出对象字节与 content-type。
+
+        返回 (bytes, mime_type)；对象不存在时抛 S3Error，由调用方决定怎么处理。
+        """
+        bucket_name, object_name = MinioStorageService.parse_storage_path(storage_path)
+        response = client.get_object(bucket_name, object_name)
+        try:
+            data = response.read()
+            mime_type = response.headers.get("Content-Type") or "application/octet-stream"
+            return data, mime_type
+        finally:
+            # MinIO 的响应基于 urllib3，必须显式释放连接，否则会耗尽连接池
+            response.close()
+            response.release_conn()
